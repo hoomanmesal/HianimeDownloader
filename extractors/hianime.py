@@ -215,6 +215,14 @@ class HianimeExtractor:
             self.driver.page_source, start_ep, end_ep
         )
 
+        # Merge with previously captured episodes if available
+        captured_episodes = session_info.get("captured_episodes", {})
+        for ep in episode_list:
+            ep_key = str(ep["number"])
+            if ep_key in captured_episodes:
+                # Reuse captured links
+                ep.update(captured_episodes[ep_key])
+
         print()
 
         self.captured_video_urls = []
@@ -232,20 +240,49 @@ class HianimeExtractor:
                 + Fore.LIGHTWHITE_EX
             )
 
-            try:
-                self.driver.requests.clear()
-                self.driver.get(url)
-                self.select_server(anime.download_type)
-                self.driver.execute_script("window.focus();")
-                media_requests = self.capture_media_requests(anime.download_type)
-                if not media_requests:
-                    print("No m3u8 file was found skipping download")
+            # Skip capture if we already have the m3u8 link from a previous session
+            if "m3u8" in episode and episode["m3u8"]:
+                # Verify if the link is still valid (not expired)
+                if self._verify_captured_links(episode):
+                    print(f"{Fore.LIGHTCYAN_EX}Using previously captured links for Episode {number}")
+                    self.captured_video_urls.append(episode["m3u8"])
+                    if not self.args.no_subtitles and "vtt" in episode:
+                        self.captured_subtitle_urls.append(episode["vtt"])
                     continue
+                else:
+                    print(f"{Fore.LIGHTYELLOW_EX}Cached links for Episode {number} have expired. Re-capturing...")
 
-                episode.update(media_requests)
-                self.captured_video_urls.append(media_requests["m3u8"])
-                if not self.args.no_subtitles:
-                    self.captured_subtitle_urls.append(media_requests["vtt"])
+            try:
+                success = False
+                for capture_attempt in range(3):
+                    try:
+                        self.driver.requests.clear()
+                        self.driver.get(url)
+                        self.select_server(anime.download_type)
+                        self.driver.execute_script("window.focus();")
+                        media_requests = self.capture_media_requests(anime.download_type)
+                        if not media_requests:
+                            print(f"No m3u8 file was found for Episode {number} (Attempt {capture_attempt+1}/3)")
+                            continue
+
+                        episode.update(media_requests)
+                        self.captured_video_urls.append(media_requests["m3u8"])
+                        if not self.args.no_subtitles:
+                            self.captured_subtitle_urls.append(media_requests.get("vtt"))
+
+                        # Update session with new captured episode
+                        self._update_session_file(anime, episode_list, start_ep, end_ep)
+                        success = True
+                        break
+                    except Exception as e:
+                        if isinstance(e, KeyboardInterrupt):
+                            raise e
+                        print(f"{Fore.LIGHTRED_EX}Error capturing Episode {number} (Attempt {capture_attempt+1}/3): {e}")
+                        time.sleep(2)
+                
+                if not success:
+                    print(f"{Fore.LIGHTRED_EX}Failed to capture Episode {number} after multiple attempts. Skipping.")
+                    continue
             except KeyboardInterrupt:
                 print("\n\nCanceling media capture...")
                 if not get_conformation(
@@ -253,12 +290,13 @@ class HianimeExtractor:
                 ):
                     self.driver.quit()
                     return
+                break
 
         self.driver.quit()
         print()
-        self.download_streams(anime, episode_list)
+        self.download_streams(anime, episode_list, start_ep, end_ep)
 
-    def download_streams(self, anime: Anime, episodes: list[dict[str, Any]]):
+    def download_streams(self, anime: Anime, episodes: list[dict[str, Any]], start_ep: int, end_ep: int):
         folder = (
             os.path.abspath(self.args.output_dir)
             + os.sep
@@ -300,13 +338,39 @@ class HianimeExtractor:
                 print(f"{Fore.LIGHTRED_EX}Could not resolve valid video URL for {name}. Skipping.")
                 continue
 
-            result = self.yt_dlp_download(
-                video_url,
-                episode["headers"],
-                f"{folder}{name}.mp4",
-            )
-            if not result:
-                break
+            try:
+                result = self.yt_dlp_download(
+                    video_url,
+                    episode["headers"],
+                    f"{folder}{name}.mp4",
+                )
+                if not result:
+                    print(f"{Fore.LIGHTYELLOW_EX}Download failed for {name}. Attempting to re-capture links...")
+                    self.configure_driver()
+                    self.driver.get(episode["url"])
+                    self.select_server(anime.download_type)
+                    media_requests = self.capture_media_requests(anime.download_type)
+                    self.driver.quit()
+                    
+                    if media_requests:
+                        episode.update(media_requests)
+                        self._update_session_file(anime, episodes, start_ep, end_ep)
+                        print(f"{Fore.LIGHTCYAN_EX}Retrying download with fresh links for {name}...")
+                        video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
+                        result = self.yt_dlp_download(
+                            video_url,
+                            episode["headers"],
+                            f"{folder}{name}.mp4",
+                        )
+                        if not result:
+                            print(f"{Fore.LIGHTRED_EX}Second download attempt failed for {name}. Moving to next.")
+                    else:
+                        print(f"{Fore.LIGHTRED_EX}Failed to re-capture links for {name}. Moving to next.")
+            except Exception as e:
+                print(f"{Fore.LIGHTRED_EX}Unexpected error while downloading {name}: {e}")
+            
+            # Short cooldown to avoid server throttling
+            time.sleep(5)
             # except Exception as e:
             #     print(f"\n\nError while downloading {name}: \n\n{e}")
 
@@ -648,16 +712,30 @@ class HianimeExtractor:
             "allow_unplayable_formats": True,
         }
 
+        if self.args.aria:
+            yt_dlp_options["external_downloader"] = "aria2c"
+            yt_dlp_options["external_downloader_args"] = [
+                "--max-connection-per-server=16",
+                "--split=16",
+                "--min-split-size=1M",
+            ]
+
         _return = True
-        with YoutubeDL(yt_dlp_options) as ydl:
-            try:
-                ydl.download([url])
-            except KeyboardInterrupt:
-                print(
-                    f"\n\n{Fore.LIGHTCYAN_EX}Canceling Downloads...\nRemoving Temp Files for {location[location.rfind(os.sep) + 1:-4]}"
-                )
-                _return = False
-                ydl.close()
+        try:
+            with YoutubeDL(yt_dlp_options) as ydl:
+                try:
+                    ydl.download([url])
+                except KeyboardInterrupt:
+                    print(
+                        f"\n\n{Fore.LIGHTCYAN_EX}Canceling Downloads...\nRemoving Temp Files for {location[location.rfind(os.sep) + 1:-4]}"
+                    )
+                    _return = False
+                except Exception as e:
+                    print(f"{Fore.LIGHTRED_EX}yt-dlp error: {e}")
+                    _return = False
+        except Exception as e:
+            print(f"{Fore.LIGHTRED_EX}Error initializing yt-dlp: {e}")
+            _return = False
 
         if not _return:
             for file in [
@@ -785,3 +863,38 @@ class HianimeExtractor:
             sub_episodes_available,
             dub_episodes_available,
         )
+
+    def _verify_captured_links(self, episode: dict) -> bool:
+        """Checks if the captured m3u8 link is still valid."""
+        try:
+            # Hianime links often expire after a few hours
+            # Use GET with stream=True and short timeout to verify without downloading
+            with requests.get(episode["m3u8"], headers=episode["headers"], timeout=5, stream=True) as response:
+                return response.status_code < 400
+        except Exception:
+            return False
+
+    def _update_session_file(self, anime: Anime, episode_list: list[dict], start_ep: int, end_ep: int):
+        """Saves current progress to the last session file."""
+        current_session = {
+            "args": {
+                "link": anime.url,
+                "download_type": anime.download_type,
+                "server": self.selected_server_name,
+                "aria": self.args.aria,
+                "no_subtitles": self.args.no_subtitles,
+                "output_dir": self.args.output_dir
+            },
+            "info": {
+                "start_ep": start_ep,
+                "end_ep": end_ep,
+                "season_number": anime.season_number,
+                "captured_episodes": {str(ep["number"]): {
+                    "m3u8": ep.get("m3u8"),
+                    "vtt": ep.get("vtt"),
+                    "headers": ep.get("headers"),
+                    "vtt_headers": ep.get("vtt_headers"),
+                } for ep in episode_list if "m3u8" in ep}
+            }
+        }
+        save_session(current_session)
