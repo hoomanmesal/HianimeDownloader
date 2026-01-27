@@ -35,3 +35,21 @@ def load_config():
         config["output_dir"] = os.path.expanduser(config["output_dir"])
     
     return config
+
+def save_session(session_data):
+    session_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".last_session.json")
+    try:
+        with open(session_path, "w") as f:
+            json.dump(session_data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving session: {e}")
+
+def load_session():
+    session_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".last_session.json")
+    if os.path.exists(session_path):
+        try:
+            with open(session_path, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading session: {e}")
+    return None

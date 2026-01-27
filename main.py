@@ -7,12 +7,24 @@ from colorama import Fore
 from extractors.general import GeneralExtractor
 from extractors.hianime import HianimeExtractor
 from extractors.instagram import InstagramExtractor
-from tools.config import load_config
+from tools.config import load_config, load_session
 
 
 class Main:
     def __init__(self):
         self.args = self.parse_args()
+        if getattr(self.args, "last", False):
+            session = load_session()
+            if session:
+                # Override arguments with last session data
+                for key, value in session.get("args", {}).items():
+                    if getattr(self.args, key, None) is None or key in ["link", "filename", "server", "download_type"]:
+                        setattr(self.args, key, value)
+                # Store extra session info (like episode range) in args for extractors
+                self.args.session_info = session.get("info", {})
+            else:
+                print(f"{Fore.LIGHTRED_EX}No previous session found.")
+
         extractor = self.get_extractor()
         extractor.run()
 
@@ -93,6 +105,12 @@ class Main:
             type=str,
             default=config.get("hianime", {}).get("server"),
             help="Streaming Server to download from",
+        )
+
+        parser.add_argument(
+            "--last",
+            action="store_true",
+            help="Repeat the last download session",
         )
 
         return parser.parse_args()

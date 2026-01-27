@@ -100,6 +100,7 @@ The main entry point handles:
 - `--server`: Select specific streaming server (for HiAnime)
 - `-t` / `--type`: Set download type (sub/dub)
 - `--aria`: Use aria2c for faster/multithreaded downloads (recommended)
+- `--last`: Repeat the last download session
 
 **Workflow:**
 

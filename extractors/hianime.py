@@ -23,6 +23,7 @@ from yt_dlp import YoutubeDL
 
 from tools.functions import get_conformation, get_int_in_range, safe_remove
 from tools.YTDLogger import YTDLogger
+from tools.config import save_session
 
 
 @dataclass
@@ -160,30 +161,55 @@ class HianimeExtractor:
             anime.download_type = "dub"
 
         number_of_episodes = getattr(anime, f"{anime.download_type}_episodes")
-        if number_of_episodes != 1:
-            start_ep = get_int_in_range(
-                f"{Fore.LIGHTCYAN_EX}Enter the starting episode number (inclusive):{Fore.LIGHTYELLOW_EX} ",
-                1,
-                number_of_episodes,
-            )
-            end_ep = get_int_in_range(
-                f"{Fore.LIGHTCYAN_EX}Enter the ending episode number (inclusive):{Fore.LIGHTYELLOW_EX} ",
-                1,
-                number_of_episodes,
-            )
-        else:
-            start_ep = 1
-            end_ep = 1
+        session_info = getattr(self.args, "session_info", {})
 
-        anime.season_number = get_int_in_range(
-            f"{Fore.LIGHTCYAN_EX}Enter the season number for this anime:{Fore.LIGHTYELLOW_EX} "
-        )
+        if session_info:
+            start_ep = session_info.get("start_ep", 1)
+            end_ep = session_info.get("end_ep", 1)
+            anime.season_number = session_info.get("season_number", 1)
+            print(f"{Fore.LIGHTCYAN_EX}Using last session episode range: {Fore.LIGHTYELLOW_EX}e{start_ep} - e{end_ep}, Season {anime.season_number}")
+        else:
+            if number_of_episodes != 1:
+                start_ep = get_int_in_range(
+                    f"{Fore.LIGHTCYAN_EX}Enter the starting episode number (inclusive):{Fore.LIGHTYELLOW_EX} ",
+                    1,
+                    number_of_episodes,
+                )
+                end_ep = get_int_in_range(
+                    f"{Fore.LIGHTCYAN_EX}Enter the ending episode number (inclusive):{Fore.LIGHTYELLOW_EX} ",
+                    1,
+                    number_of_episodes,
+                )
+            else:
+                start_ep = 1
+                end_ep = 1
+
+            anime.season_number = get_int_in_range(
+                f"{Fore.LIGHTCYAN_EX}Enter the season number for this anime:{Fore.LIGHTYELLOW_EX} "
+            )
 
         self.configure_driver()
         self.driver.get(anime.url)
         self.find_server_name(anime)
         self.driver.get(anime.url)
         self.select_server(anime.download_type)
+
+        # Save session data for next time
+        save_session({
+            "args": {
+                "link": anime.url,
+                "download_type": anime.download_type,
+                "server": self.selected_server_name,
+                "aria": self.args.aria,
+                "no_subtitles": self.args.no_subtitles,
+                "output_dir": self.args.output_dir
+            },
+            "info": {
+                "start_ep": start_ep,
+                "end_ep": end_ep,
+                "season_number": anime.season_number
+            }
+        })
 
         episode_list: list[dict] = self.get_episode_urls(
             self.driver.page_source, start_ep, end_ep

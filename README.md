@@ -112,6 +112,8 @@ You are able to pass parameters when running the file to add additional options.
 
 - `--aria` uses the aria2c downloader for yt-dlp. Highly recommended for unstable connections.
 
+- `--last` repeats the last successful download session, including anime link, episodes, and season number.
+
 ### Usage Example
 
 ```bash
