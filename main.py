@@ -8,6 +8,7 @@ from extractors.general import GeneralExtractor
 from extractors.hianime import HianimeExtractor
 from extractors.instagram import InstagramExtractor
 from tools.config import load_config, load_session
+from tools.functions import play_error_sound
 
 
 class Main:
@@ -118,6 +119,10 @@ class Main:
 
 if __name__ == "__main__":
     start = time.time()
-    Main()
+    try:
+        Main()
+    except Exception as e:
+        play_error_sound()
+        raise e
     elapsed = time.time() - start
     print(f"Took {int(elapsed / 60)}:{int((elapsed % 60))} to finish")

@@ -433,13 +433,21 @@ class HianimeExtractor:
     def find_server_name(self, anime: Anime) -> str:
         options = self.get_server_options(anime.download_type)
         server_names = [option.text for option in options]
-        
+
         default_index = -1
         if self.args.server:
             for i, name in enumerate(server_names):
                 if name.lower().strip() == self.args.server.lower().strip():
                     default_index = i + 1
                     break
+
+        if getattr(self.args, "last", False) and default_index != -1:
+            selection = server_names[default_index - 1]
+            print(
+                f"\n{Fore.LIGHTGREEN_EX}Auto-selecting server from last session: {Fore.LIGHTCYAN_EX}{selection}"
+            )
+            self.selected_server_name = selection
+            return selection
 
         print(f"\n{Fore.LIGHTGREEN_EX}Select the server you want to download from: \n")
         for i, name in enumerate(server_names):
@@ -453,12 +461,17 @@ class HianimeExtractor:
             prompt += f" [{Fore.LIGHTYELLOW_EX}{default_index}{Fore.LIGHTCYAN_EX}]"
         prompt += f":{Fore.LIGHTYELLOW_EX} "
 
-        selection_idx = get_int_in_range(prompt, 1, len(server_names), default=default_index if default_index != -1 else None)
+        selection_idx = get_int_in_range(
+            prompt,
+            1,
+            len(server_names),
+            default=default_index if default_index != -1 else None,
+        )
         selection = server_names[selection_idx - 1]
 
         print(f"\n{Fore.LIGHTGREEN_EX}You chose: {Fore.LIGHTCYAN_EX}{selection}")
         self.selected_server_name = selection
-        
+
         # Restart driver to begin the actual capture session
         self.configure_driver()
         return selection

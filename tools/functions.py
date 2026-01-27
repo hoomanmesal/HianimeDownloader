@@ -44,3 +44,19 @@ def safe_remove(file: str, retries: int = 5, delay: int = 2):
             print("Retrying deletion of files")
             time.sleep(delay)
     print("failed to remove file")
+
+
+def play_error_sound():
+    try:
+        import winsound
+        # A simple "unhappy" melody with small pauses to ensure notes are distinct
+        winsound.Beep(440, 200)   # A4
+        time.sleep(0.05)
+        winsound.Beep(349, 200)   # F4
+        time.sleep(0.05)
+        winsound.Beep(261, 500)   # C4
+    except ImportError:
+        # Not on Windows, or winsound not available
+        print("\a")  # System bell
+    except Exception:
+        pass
