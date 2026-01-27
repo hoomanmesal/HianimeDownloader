@@ -4,10 +4,19 @@ from colorama import Fore
 
 
 class YTDLogger:
-    @staticmethod
-    def debug(msg: str):
+    def __init__(self):
+        self.has_errors = False
+        self.fragment_errors = False
+
+    def debug(self, msg: str):
         if not msg.startswith("[download]"):
             return
+        
+        if "fragment not found" in msg.lower() or "error" in msg.lower():
+            self.has_errors = True
+            if "fragment" in msg.lower():
+                self.fragment_errors = True
+
         color = (
             Fore.LIGHTRED_EX
             if "fragment not found" in msg
@@ -24,15 +33,19 @@ class YTDLogger:
             return
         print(new_msg)
 
-    @staticmethod
-    def info(msg):
+    def info(self, msg):
         print(f"[Logger Info] {msg}")
 
-    @staticmethod
-    def warning(msg):
-        pass
+    def warning(self, msg):
+        if "fragment" in msg.lower() or "error" in msg.lower():
+            self.has_errors = True
+            if "fragment" in msg.lower():
+                self.fragment_errors = True
 
-    @staticmethod
-    def error(msg):
-        print(f"[Logger Error] {msg}")
+    def error(self, msg):
+        self.has_errors = True
+        if "fragment" in msg.lower():
+            self.fragment_errors = True
+        print(f"{Fore.LIGHTRED_EX}[Logger Error] {msg}")
+
 

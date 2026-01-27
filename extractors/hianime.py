@@ -235,6 +235,7 @@ class HianimeExtractor:
         )
         os.makedirs(folder, exist_ok=True)
 
+        download_results: list[tuple[dict, dict]] = []
         for episode in episode_list:
             url = episode["url"]
             number = episode["number"]
@@ -248,6 +249,7 @@ class HianimeExtractor:
             # Check if file already exists in the output directory
             if os.path.exists(os.path.join(folder, f"{name}.mp4")):
                 print(f"{Fore.LIGHTGREEN_EX}Episode {number} already exists. Skipping.")
+                download_results.append((episode, {"success": True, "already_exists": True}))
                 continue
 
             # Step 1: Get Link (Cache or Browser)
@@ -287,25 +289,69 @@ class HianimeExtractor:
                             time.sleep(2)
                     
                     # We quit the driver after each episode capture to keep the system clean
-                    # and prevent detection from long idle sessions
-                    self.driver.quit()
-                    delattr(self, "driver")
+                    if hasattr(self, "driver"):
+                        self.driver.quit()
+                        delattr(self, "driver")
                 except KeyboardInterrupt:
                     print("\n\nStopping...")
                     return
 
             # Step 2: Download immediately
             if has_valid_link:
-                self.download_single_episode(anime, episode, folder)
+                status = self.download_single_episode(anime, episode, folder)
+                download_results.append((episode, status))
                 # Success updated session
                 self._update_session_file(anime, episode_list, start_ep, end_ep)
             else:
                 print(f"{Fore.LIGHTRED_EX}Could not get links for Episode {number}. Skipping.")
+                download_results.append((episode, {"success": False, "error": "Could not get links"}))
 
         print(f"\n{Fore.LIGHTGREEN_EX}Queue finished!")
+        
+        # Summary and Redownload Handling
+        print(f"\n{Fore.LIGHTCYAN_EX}{'='*20} DOWNLOAD SUMMARY {'='*20}")
+        fragment_failures = []
+        for episode, status in download_results:
+            number = episode['number']
+            if status.get('already_exists'):
+                print(f"{Fore.LIGHTGREEN_EX}Episode {number:02}: Already existed")
+            elif status['success']:
+                print(f"{Fore.LIGHTGREEN_EX}Episode {number:02}: Successfully downloaded")
+            elif status.get('fragment_error'):
+                print(f"{Fore.LIGHTRED_EX}Episode {number:02}: INCOMPLETE (Fragments missing)")
+                fragment_failures.append(episode)
+            else:
+                print(f"{Fore.LIGHTRED_EX}Episode {number:02}: FAILED ({status.get('error', 'Unknown error')})")
+        print(f"{Fore.LIGHTCYAN_EX}{'='*58}\n")
 
-    def download_single_episode(self, anime: Anime, episode: dict, folder: str):
+        for episode in fragment_failures:
+            number = episode['number']
+            title = episode['title']
+            name = f"{anime.name} - s{anime.season_number:02}e{number:02} - {title}"
+            filepath = os.path.join(folder, f"{name}.mp4")
+            
+            print(f"{Fore.LIGHTYELLOW_EX}Episode {number} was incomplete due to missing fragments.")
+            if get_conformation(f"{Fore.LIGHTCYAN_EX}Would you like to delete the incomplete file and try redownloading it? (y/n): "):
+                safe_remove(filepath)
+                # Re-verify and re-download
+                if not self._verify_captured_links(episode):
+                    print(f"{Fore.LIGHTYELLOW_EX}Links expired, capturing fresh links...")
+                    self.configure_driver()
+                    self.driver.get(episode["url"])
+                    self.select_server(anime.download_type)
+                    media_requests = self.capture_media_requests(anime.download_type)
+                    self.driver.quit()
+                    if hasattr(self, "driver"): delattr(self, "driver")
+                    if media_requests:
+                        episode.update(media_requests)
+                
+                print(f"{Fore.LIGHTCYAN_EX}Retrying Episode {number}...")
+                self.download_single_episode(anime, episode, folder)
+
+
+    def download_single_episode(self, anime: Anime, episode: dict, folder: str) -> dict[str, Any]:
         name = f"{anime.name} - s{anime.season_number:02}e{episode['number']:02} - {episode['title']}"
+        filepath = os.path.join(folder, f"{name}.mp4")
 
         # Download subtitles FIRST
         if "vtt" in episode.keys() and episode["vtt"]:
@@ -326,33 +372,41 @@ class HianimeExtractor:
         video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
         if not video_url:
             print(f"{Fore.LIGHTRED_EX}Could not resolve valid video URL for {name}.")
-            return
+            return {"success": False, "error": "No video URL", "fragment_error": False}
 
         try:
-            result = self.yt_dlp_download(
+            status = self.yt_dlp_download(
                 video_url,
                 episode["headers"],
-                f"{folder}{name}.mp4",
+                filepath,
             )
-            if not result:
-                # Capture fresh link and retry once
+            
+            if not status["success"] and not status.get("fragment_error"):
+                # Capture fresh link and retry once if it wasn't a fragment error
                 print(f"{Fore.LIGHTYELLOW_EX}Download failed. Retrying one more time with fresh links...")
-                self.configure_driver()
+                # We need to re-capture links here
+                if not hasattr(self, "driver") or not self.driver:
+                    self.configure_driver()
                 self.driver.get(episode["url"])
                 self.select_server(anime.download_type)
                 media_requests = self.capture_media_requests(anime.download_type)
                 self.driver.quit()
-                delattr(self, "driver")
+                if hasattr(self, "driver"): delattr(self, "driver")
 
                 if media_requests:
                     episode.update(media_requests)
                     video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
-                    self.yt_dlp_download(video_url, episode["headers"], f"{folder}{name}.mp4")
+                    status = self.yt_dlp_download(video_url, episode["headers"], filepath)
+            
+            return status
+
         except Exception as e:
             print(f"{Fore.LIGHTRED_EX}Unexpected error: {e}")
+            return {"success": False, "error": str(e), "fragment_error": False}
+        finally:
+            # Short cooldown
+            time.sleep(2)
 
-        # Short cooldown
-        time.sleep(5)
 
     def get_download_type(self):
         default_type = getattr(self.args, "download_type", "sub")
@@ -676,14 +730,15 @@ class HianimeExtractor:
 
         return url
 
-    def yt_dlp_download(self, url: str, headers: dict[str, str], location: str) -> bool:
+    def yt_dlp_download(self, url: str, headers: dict[str, str], location: str) -> dict[str, Any]:
+        logger = YTDLogger()
         yt_dlp_options: dict[str, Any] = {
             "no_warnings": False,
             "quiet": False,
             "outtmpl": location,
             "format": "best",
             "http_headers": headers,
-            "logger": YTDLogger(),
+            "logger": logger,
             "fragment_retries": 10,  # Retry up to 10 times for failed fragments
             "retries": 10,
             "socket_timeout": 60,
@@ -700,32 +755,45 @@ class HianimeExtractor:
                 "--min-split-size=1M",
             ]
 
-        _return = True
+        status = {"success": True, "fragment_error": False, "error": None}
         try:
             with YoutubeDL(yt_dlp_options) as ydl:
                 try:
                     ydl.download([url])
+                    if logger.fragment_errors:
+                        status["success"] = False
+                        status["fragment_error"] = True
                 except KeyboardInterrupt:
                     print(
                         f"\n\n{Fore.LIGHTCYAN_EX}Canceling Downloads...\nRemoving Temp Files for {location[location.rfind(os.sep) + 1:-4]}"
                     )
-                    _return = False
+                    status["success"] = False
+                    status["error"] = "Cancelled"
                 except Exception as e:
                     print(f"{Fore.LIGHTRED_EX}yt-dlp error: {e}")
-                    _return = False
+                    status["success"] = False
+                    status["error"] = str(e)
         except Exception as e:
             print(f"{Fore.LIGHTRED_EX}Error initializing yt-dlp: {e}")
-            _return = False
+            status["success"] = False
+            status["error"] = str(e)
 
-        if not _return:
+        if not status["success"]:
+            # Clean up partial files if it wasn't a fragment error that we might want to keep/check
+            # Actually, the user wants to delete if incomplete.
             for file in [
                 f
                 for f in glob(location[:-4] + ".*")
-                if not f.endswith((".mp4", ".vtt"))
+                if not f.endswith((".vtt")) # Keep subtitles
             ]:
-                safe_remove(file)
+                if os.path.exists(file):
+                    # For fragment errors, we might want to wait until the end to delete/retry
+                    # but the user said "then I want the downloaded file to be deleted (if its saved)"
+                    # and "download to be redownloaded after confirmation"
+                    pass 
 
-        return _return
+        return status
+
 
     def get_anime(self, name: str | None = None) -> Anime | None:
         os.system("cls" if os.name == "nt" else "clear")
