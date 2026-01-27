@@ -311,12 +311,17 @@ class HianimeExtractor:
         # Summary and Redownload Handling
         print(f"\n{Fore.LIGHTCYAN_EX}{'='*20} DOWNLOAD SUMMARY {'='*20}")
         fragment_failures = []
+        subtitle_failures = []
         for episode, status in download_results:
             number = episode['number']
             if status.get('already_exists'):
                 print(f"{Fore.LIGHTGREEN_EX}Episode {number:02}: Already existed")
             elif status['success']:
-                print(f"{Fore.LIGHTGREEN_EX}Episode {number:02}: Successfully downloaded")
+                if not status.get('subtitle_success') and not self.args.no_subtitles:
+                    print(f"{Fore.LIGHTYELLOW_EX}Episode {number:02}: Video Success, Subtitles FAILED")
+                    subtitle_failures.append(episode)
+                else:
+                    print(f"{Fore.LIGHTGREEN_EX}Episode {number:02}: Successfully downloaded")
             elif status.get('fragment_error'):
                 print(f"{Fore.LIGHTRED_EX}Episode {number:02}: INCOMPLETE (Fragments missing)")
                 fragment_failures.append(episode)
@@ -324,7 +329,9 @@ class HianimeExtractor:
                 print(f"{Fore.LIGHTRED_EX}Episode {number:02}: FAILED ({status.get('error', 'Unknown error')})")
         print(f"{Fore.LIGHTCYAN_EX}{'='*58}\n")
 
+        # Handle Video/Fragment Retries
         for episode in fragment_failures:
+            # ... (same logic as before for fragment retries)
             number = episode['number']
             title = episode['title']
             name = f"{anime.name} - s{anime.season_number:02}e{number:02} - {title}"
@@ -348,25 +355,62 @@ class HianimeExtractor:
                 print(f"{Fore.LIGHTCYAN_EX}Retrying Episode {number}...")
                 self.download_single_episode(anime, episode, folder)
 
+        # Handle Subtitle-only Retries
+        for episode in subtitle_failures:
+            number = episode['number']
+            print(f"{Fore.LIGHTYELLOW_EX}Episode {number} is missing subtitles.")
+            if get_conformation(f"{Fore.LIGHTCYAN_EX}Would you like to retry downloading the subtitles for Episode {number}? (y/n): "):
+                # Re-verify links if needed (subtitles also expire sometimes)
+                if not self._verify_captured_links(episode):
+                    print(f"{Fore.LIGHTYELLOW_EX}Links expired, capturing fresh links for subtitles...")
+                    self.configure_driver()
+                    self.driver.get(episode["url"])
+                    self.select_server(anime.download_type)
+                    media_requests = self.capture_media_requests(anime.download_type)
+                    self.driver.quit()
+                    if hasattr(self, "driver"): delattr(self, "driver")
+                    if media_requests:
+                        episode.update(media_requests)
+                
+                # We can call download_single_episode again, it will skip video if .mp4 exists
+                self.download_single_episode(anime, episode, folder)
+
+
 
     def download_single_episode(self, anime: Anime, episode: dict, folder: str) -> dict[str, Any]:
         name = f"{anime.name} - s{anime.season_number:02}e{episode['number']:02} - {episode['title']}"
         filepath = os.path.join(folder, f"{name}.mp4")
+        subtitle_success = True
 
         # Download subtitles FIRST
         if "vtt" in episode.keys() and episode["vtt"]:
-            try:
-                vtt_headers = episode.get("vtt_headers", episode["headers"])
-                response = requests.get(episode["vtt"], headers=vtt_headers, timeout=30)
-                if response.status_code == 200:
-                    with open(f"{folder}{name}.vtt", "wb") as vtt_file:
-                        vtt_file.write(response.content)
-                else:
-                    print(f"{Fore.LIGHTRED_EX}Failed to download subtitles (HTTP {response.status_code}).")
-            except Exception as e:
-                print(f"{Fore.LIGHTRED_EX}Error downloading subtitles: {e}")
+            max_subtitle_retries = 3
+            subtitle_downloaded = False
+            for attempt in range(max_subtitle_retries):
+                try:
+                    vtt_headers = episode.get("vtt_headers", episode["headers"])
+                    response = requests.get(episode["vtt"], headers=vtt_headers, timeout=30)
+                    if response.status_code == 200:
+                        with open(f"{folder}{name}.vtt", "wb") as vtt_file:
+                            vtt_file.write(response.content)
+                        subtitle_downloaded = True
+                        break
+                    else:
+                        print(f"{Fore.LIGHTRED_EX}Failed to download subtitles (HTTP {response.status_code}). Attempt {attempt + 1}/{max_subtitle_retries}")
+                except Exception as e:
+                    print(f"{Fore.LIGHTRED_EX}Error downloading subtitles: {e}. Attempt {attempt + 1}/{max_subtitle_retries}")
+                
+                if attempt < max_subtitle_retries - 1:
+                    time.sleep(2)
+            
+            if not subtitle_downloaded:
+                print(f"{Fore.LIGHTRED_EX}Subtitle download failed after {max_subtitle_retries} attempts.")
+                subtitle_success = False
         elif not self.args.no_subtitles:
             print(f"Skipping {name}.vtt (No VTT Found)")
+            subtitle_success = False
+
+
 
         # Download Video
         video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
@@ -398,14 +442,16 @@ class HianimeExtractor:
                     video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
                     status = self.yt_dlp_download(video_url, episode["headers"], filepath)
             
+            status["subtitle_success"] = subtitle_success
             return status
 
         except Exception as e:
             print(f"{Fore.LIGHTRED_EX}Unexpected error: {e}")
-            return {"success": False, "error": str(e), "fragment_error": False}
+            return {"success": False, "error": str(e), "fragment_error": False, "subtitle_success": subtitle_success}
         finally:
             # Short cooldown
             time.sleep(2)
+
 
 
     def get_download_type(self):
