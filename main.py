@@ -7,6 +7,7 @@ from colorama import Fore
 from extractors.general import GeneralExtractor
 from extractors.hianime import HianimeExtractor
 from extractors.instagram import InstagramExtractor
+from tools.config import load_config
 
 
 class Main:
@@ -36,11 +37,13 @@ class Main:
         return GeneralExtractor(args=self.args)
 
     def parse_args(self):
+        config = load_config()
         parser = argparse.ArgumentParser(description="Anime downloader options")
 
         parser.add_argument(
             "--no-subtitles",
             action="store_true",
+            default=config.get("no_subtitles", False),
             help="Skip downloading subtitle files (.vtt)",
         )
 
@@ -48,7 +51,7 @@ class Main:
             "-o",
             "--output-dir",
             type=str,
-            default="output",
+            default=config.get("output_dir", "output"),
             help="Directory to save downloaded files",
         )
 
@@ -63,7 +66,7 @@ class Main:
         parser.add_argument(
             "--aria",
             action="store_true",
-            default=False,
+            default=config.get("aria", False),
             help="Use aria2c as external downloader",
         )
 
@@ -76,7 +79,20 @@ class Main:
         )
 
         parser.add_argument(
-            "--server", type=str, default=None, help="Streaming Server to download from"
+            "-t",
+            "--type",
+            type=str,
+            dest="download_type",
+            default=config.get("hianime", {}).get("type", "sub"),
+            choices=["sub", "dub", "s", "d"],
+            help="Download type (sub or dub)",
+        )
+
+        parser.add_argument(
+            "--server",
+            type=str,
+            default=config.get("hianime", {}).get("server"),
+            help="Streaming Server to download from",
         )
 
         return parser.parse_args()

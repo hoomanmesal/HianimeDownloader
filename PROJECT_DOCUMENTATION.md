@@ -98,7 +98,8 @@ The main entry point handles:
 - `-n` / `--filename`: Custom filename or anime name for search
 - `--no-subtitles`: Skip downloading subtitle files
 - `--server`: Select specific streaming server (for HiAnime)
-- `--aria`: Use aria2c as external downloader
+- `-t` / `--type`: Set download type (sub/dub)
+- `--aria`: Use aria2c for faster/multithreaded downloads (recommended)
 
 **Workflow:**
 
@@ -139,8 +140,9 @@ The most complex extractor, handling anime downloads from hianime.to.
    - Uses Selenium Wire to intercept network requests
    - Navigates to each episode page
    - Monitors network traffic for:
-     - `.m3u8` files (HLS video streams) - specifically "master" playlists
+     - `.m3u8` files (HLS video streams) - Relaxed detection (not just "master")
      - `.vtt` files (WebVTT subtitle files)
+   - Captures specific HTTP headers for both video and subtitles to avoid 403 Forbidden errors
    - Filters subtitles by language (English by default, supports 30+ languages)
    - Uses language detection to ensure correct subtitle selection
    - Retries up to 45 times with page refreshes at attempts 15 and 30
@@ -148,9 +150,10 @@ The most complex extractor, handling anime downloads from hianime.to.
 
 5. **Download Phase:**
    - Uses `yt-dlp` to download HLS streams
-   - Resolves master.m3u8 to find actual video variant
+   - Resolves variants or falls back to the original index playlist
    - Downloads video as MP4 format
-   - Downloads subtitle files as VTT
+   - Downloads subtitle files as VTT using the `requests` library (faster and avoids 403 errors)
+   - Downloads subtitles _before_ the video to prevent link expiration
    - Handles retries and error recovery
    - Creates organized folder structure
 
@@ -230,6 +233,14 @@ Fallback extractor for other platforms (TikTok, YouTube, etc.).
 - Force keyframes at cuts for better editing compatibility
 
 ### 3. Utility Tools
+
+#### `tools/config.py`
+
+Handles project-wide configuration:
+
+- Loads defaults from `config.json`
+- Supports home directory expansion (`~`) for paths
+- Provides default values for CLI arguments
 
 #### `tools/functions.py`
 

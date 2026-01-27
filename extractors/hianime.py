@@ -147,7 +147,11 @@ class HianimeExtractor:
         )
 
         if anime.sub_episodes != 0 and anime.dub_episodes != 0:
-            anime.download_type = self.get_download_type()
+            anime.download_type = self.args.download_type
+            if anime.download_type == "s":
+                anime.download_type = "sub"
+            elif anime.download_type == "d":
+                anime.download_type = "dub"
         elif anime.dub_episodes == 0:
             print("Dub episodes are not available. Defaulting to sub.")
             anime.download_type = "sub"
@@ -265,8 +269,13 @@ class HianimeExtractor:
                 print(f"Skipping {name}.vtt (No VTT Stream Found)")
 
             # Download Video
+            video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
+            if not video_url:
+                print(f"{Fore.LIGHTRED_EX}Could not resolve valid video URL for {name}. Skipping.")
+                continue
+
             result = self.yt_dlp_download(
-                self.look_for_variants(episode["m3u8"], episode["headers"]),
+                video_url,
                 episode["headers"],
                 f"{folder}{name}.mp4",
             )
@@ -275,15 +284,17 @@ class HianimeExtractor:
             # except Exception as e:
             #     print(f"\n\nError while downloading {name}: \n\n{e}")
 
-    @staticmethod
-    def get_download_type():
+    def get_download_type(self):
+        default_type = getattr(self.args, "download_type", "sub")
         ans = (
             input(
-                f"\n{Fore.LIGHTCYAN_EX}Both sub and dub episodes are available. Do you want to download sub or dub? (Enter 'sub' or 'dub'):{Fore.LIGHTYELLOW_EX} "
+                f"\n{Fore.LIGHTCYAN_EX}Both sub and dub episodes are available. Do you want to download sub or dub? (Enter 'sub' or 'dub') [{Fore.LIGHTYELLOW_EX}{default_type}{Fore.LIGHTCYAN_EX}]:{Fore.LIGHTYELLOW_EX} "
             )
             .strip()
             .lower()
         )
+        if not ans:
+            return default_type
         if ans == "sub" or ans == "s":
             return "sub"
         elif ans == "dub" or ans == "d":
@@ -291,7 +302,7 @@ class HianimeExtractor:
         print(
             f"{Fore.LIGHTRED_EX}Invalid response, please respond with either 'sub' or 'dub'."
         )
-        return HianimeExtractor.get_download_type()
+        return self.get_download_type()
 
     def configure_driver(self) -> None:
         mobile_emulation: dict[str, str] = {"deviceName": "iPhone X"}
@@ -395,35 +406,29 @@ class HianimeExtractor:
 
     def find_server_name(self, anime: Anime) -> str:
         options = self.get_server_options(anime.download_type)
-        selection = None
-
+        server_names = [option.text for option in options]
+        
+        default_index = -1
         if self.args.server:
-            for option in options:
-                if option.text.lower().strip() == self.args.server.lower().strip():
-                    selection = option.text
-
-        if not selection:
-            if self.args.server:
-                print(f"{Fore.LIGHTGREEN_EX}The server name you provided does not exist\n")
-            print(f"\n{Fore.LIGHTGREEN_EX}Select the server you want to download from: \n")
-
-            server_names = [option.text for option in options]
             for i, name in enumerate(server_names):
-                print(f"{Fore.LIGHTRED_EX} {i + 1}: {Fore.LIGHTCYAN_EX}{name}")
+                if name.lower().strip() == self.args.server.lower().strip():
+                    default_index = i + 1
+                    break
 
-            # Quit driver to pause for interactive input safely
-            self.driver.quit()
+        print(f"\n{Fore.LIGHTGREEN_EX}Select the server you want to download from: \n")
+        for i, name in enumerate(server_names):
+            print(f"{Fore.LIGHTRED_EX} {i + 1}: {Fore.LIGHTCYAN_EX}{name}")
 
-            selection = server_names[
-                get_int_in_range(
-                    f"\n{Fore.LIGHTCYAN_EX}Server:{Fore.LIGHTYELLOW_EX} ",
-                    1,
-                    len(server_names),
-                )
-                - 1
-            ]
-        else:
-            self.driver.quit()
+        # Quit driver to pause for interactive input safely
+        self.driver.quit()
+
+        prompt = f"\n{Fore.LIGHTCYAN_EX}Server"
+        if default_index != -1:
+            prompt += f" [{Fore.LIGHTYELLOW_EX}{default_index}{Fore.LIGHTCYAN_EX}]"
+        prompt += f":{Fore.LIGHTYELLOW_EX} "
+
+        selection_idx = get_int_in_range(prompt, 1, len(server_names), default=default_index if default_index != -1 else None)
+        selection = server_names[selection_idx - 1]
 
         print(f"\n{Fore.LIGHTGREEN_EX}You chose: {Fore.LIGHTCYAN_EX}{selection}")
         self.selected_server_name = selection
@@ -583,8 +588,8 @@ class HianimeExtractor:
                 url = urljoin(m3u8_url, line.strip())
                 break
         if not url:
-            print("No valid video variant found in master.m3u8")
-            return ""
+            # Fallback to the original URL if no variants are listed inside it
+            return m3u8_url
 
         return url
 
