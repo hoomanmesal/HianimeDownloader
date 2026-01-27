@@ -227,76 +227,6 @@ class HianimeExtractor:
 
         self.captured_video_urls = []
         self.captured_subtitle_urls = []
-        for episode in episode_list:
-            url = episode["url"]
-            number = episode["number"]
-            title = episode["title"]
-
-            print(
-                Fore.LIGHTGREEN_EX
-                + "Getting"
-                + Fore.LIGHTWHITE_EX
-                + f" Episode {number} - {title} from {url}"
-                + Fore.LIGHTWHITE_EX
-            )
-
-            # Skip capture if we already have the m3u8 link from a previous session
-            if "m3u8" in episode and episode["m3u8"]:
-                # Verify if the link is still valid (not expired)
-                if self._verify_captured_links(episode):
-                    print(f"{Fore.LIGHTCYAN_EX}Using previously captured links for Episode {number}")
-                    self.captured_video_urls.append(episode["m3u8"])
-                    if not self.args.no_subtitles and "vtt" in episode:
-                        self.captured_subtitle_urls.append(episode["vtt"])
-                    continue
-                else:
-                    print(f"{Fore.LIGHTYELLOW_EX}Cached links for Episode {number} have expired. Re-capturing...")
-
-            try:
-                success = False
-                for capture_attempt in range(3):
-                    try:
-                        self.driver.requests.clear()
-                        self.driver.get(url)
-                        self.select_server(anime.download_type)
-                        self.driver.execute_script("window.focus();")
-                        media_requests = self.capture_media_requests(anime.download_type)
-                        if not media_requests:
-                            print(f"No m3u8 file was found for Episode {number} (Attempt {capture_attempt+1}/3)")
-                            continue
-
-                        episode.update(media_requests)
-                        self.captured_video_urls.append(media_requests["m3u8"])
-                        if not self.args.no_subtitles:
-                            self.captured_subtitle_urls.append(media_requests.get("vtt"))
-
-                        # Update session with new captured episode
-                        self._update_session_file(anime, episode_list, start_ep, end_ep)
-                        success = True
-                        break
-                    except Exception as e:
-                        if isinstance(e, KeyboardInterrupt):
-                            raise e
-                        print(f"{Fore.LIGHTRED_EX}Error capturing Episode {number} (Attempt {capture_attempt+1}/3): {e}")
-                        time.sleep(2)
-                
-                if not success:
-                    print(f"{Fore.LIGHTRED_EX}Failed to capture Episode {number} after multiple attempts. Skipping.")
-                    continue
-            except KeyboardInterrupt:
-                print("\n\nCanceling media capture...")
-                if not get_conformation(
-                    "Would you like to download link capture up to now? (y/n): "
-                ):
-                    self.driver.quit()
-                    return
-                break
-
-        self.driver.quit()
-        print()
-        self.download_streams(anime, episode_list, start_ep, end_ep)
-
-    def download_streams(self, anime: Anime, episodes: list[dict[str, Any]], start_ep: int, end_ep: int):
         folder = (
             os.path.abspath(self.args.output_dir)
             + os.sep
@@ -305,74 +235,124 @@ class HianimeExtractor:
         )
         os.makedirs(folder, exist_ok=True)
 
-        # Write to JSON file
-        with open(
-            f"{folder}{anime.name} (Season {anime.season_number}).json", "w"
-        ) as json_file:
-            json.dump({**asdict(anime), "episodes": episodes}, json_file, indent=4)
+        for episode in episode_list:
+            url = episode["url"]
+            number = episode["number"]
+            title = episode["title"]
+            name = f"{anime.name} - s{anime.season_number:02}e{number:02} - {title}"
 
-        for episode in episodes:
-            name = f"{anime.name} - s{anime.season_number:02}e{episode['number']:02} - {episode['title']}"
-            if not episode.get("m3u8"):
-                print(f"Skipping {name} (No M3U8 Stream Found)")
+            print(
+                f"\n{Fore.LIGHTCYAN_EX}--- Processing Episode {number} ---"
+            )
+
+            # Check if file already exists in the output directory
+            if os.path.exists(os.path.join(folder, f"{name}.mp4")):
+                print(f"{Fore.LIGHTGREEN_EX}Episode {number} already exists. Skipping.")
                 continue
 
-            # Download subtitles FIRST (to avoid link expiration while video downloads)
-            if "vtt" in episode.keys() and episode["vtt"]:
+            # Step 1: Get Link (Cache or Browser)
+            has_valid_link = False
+            if "m3u8" in episode and episode["m3u8"]:
+                if self._verify_captured_links(episode):
+                    print(f"{Fore.LIGHTCYAN_EX}Using cached links for Episode {number}")
+                    has_valid_link = True
+                else:
+                    print(f"{Fore.LIGHTYELLOW_EX}Cached links for Episode {number} expired.")
+
+            if not has_valid_link:
                 try:
-                    vtt_headers = episode.get("vtt_headers", episode["headers"])
-                    response = requests.get(episode["vtt"], headers=vtt_headers, timeout=30)
-                    if response.status_code == 200:
-                        with open(f"{folder}{name}.vtt", "wb") as vtt_file:
-                            vtt_file.write(response.content)
-                    else:
-                        print(f"{Fore.LIGHTRED_EX}Failed to download subtitles (HTTP {response.status_code}). Skipping .vtt")
-                except Exception as e:
-                    print(f"{Fore.LIGHTRED_EX}Error downloading subtitles: {e}")
-            elif not self.args.no_subtitles:
-                print(f"Skipping {name}.vtt (No VTT Stream Found)")
-
-            # Download Video
-            video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
-            if not video_url:
-                print(f"{Fore.LIGHTRED_EX}Could not resolve valid video URL for {name}. Skipping.")
-                continue
-
-            try:
-                result = self.yt_dlp_download(
-                    video_url,
-                    episode["headers"],
-                    f"{folder}{name}.mp4",
-                )
-                if not result:
-                    print(f"{Fore.LIGHTYELLOW_EX}Download failed for {name}. Attempting to re-capture links...")
-                    self.configure_driver()
-                    self.driver.get(episode["url"])
-                    self.select_server(anime.download_type)
-                    media_requests = self.capture_media_requests(anime.download_type)
-                    self.driver.quit()
+                    # Open driver only when needed
+                    if not hasattr(self, "driver") or not self.driver:
+                        self.configure_driver()
                     
-                    if media_requests:
-                        episode.update(media_requests)
-                        self._update_session_file(anime, episodes, start_ep, end_ep)
-                        print(f"{Fore.LIGHTCYAN_EX}Retrying download with fresh links for {name}...")
-                        video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
-                        result = self.yt_dlp_download(
-                            video_url,
-                            episode["headers"],
-                            f"{folder}{name}.mp4",
-                        )
-                        if not result:
-                            print(f"{Fore.LIGHTRED_EX}Second download attempt failed for {name}. Moving to next.")
-                    else:
-                        print(f"{Fore.LIGHTRED_EX}Failed to re-capture links for {name}. Moving to next.")
+                    success = False
+                    for capture_attempt in range(3):
+                        try:
+                            self.driver.requests.clear()
+                            self.driver.get(url)
+                            self.select_server(anime.download_type)
+                            self.driver.execute_script("window.focus();")
+                            media_requests = self.capture_media_requests(anime.download_type)
+                            if media_requests:
+                                episode.update(media_requests)
+                                self._update_session_file(anime, episode_list, start_ep, end_ep)
+                                has_valid_link = True
+                                success = True
+                                break
+                            else:
+                                print(f"Capture failed (Attempt {capture_attempt+1}/3)")
+                        except Exception as e:
+                            if isinstance(e, KeyboardInterrupt): raise e
+                            print(f"Error: {e}")
+                            time.sleep(2)
+                    
+                    # We quit the driver after each episode capture to keep the system clean
+                    # and prevent detection from long idle sessions
+                    self.driver.quit()
+                    delattr(self, "driver")
+                except KeyboardInterrupt:
+                    print("\n\nStopping...")
+                    return
+
+            # Step 2: Download immediately
+            if has_valid_link:
+                self.download_single_episode(anime, episode, folder)
+                # Success updated session
+                self._update_session_file(anime, episode_list, start_ep, end_ep)
+            else:
+                print(f"{Fore.LIGHTRED_EX}Could not get links for Episode {number}. Skipping.")
+
+        print(f"\n{Fore.LIGHTGREEN_EX}Queue finished!")
+
+    def download_single_episode(self, anime: Anime, episode: dict, folder: str):
+        name = f"{anime.name} - s{anime.season_number:02}e{episode['number']:02} - {episode['title']}"
+
+        # Download subtitles FIRST
+        if "vtt" in episode.keys() and episode["vtt"]:
+            try:
+                vtt_headers = episode.get("vtt_headers", episode["headers"])
+                response = requests.get(episode["vtt"], headers=vtt_headers, timeout=30)
+                if response.status_code == 200:
+                    with open(f"{folder}{name}.vtt", "wb") as vtt_file:
+                        vtt_file.write(response.content)
+                else:
+                    print(f"{Fore.LIGHTRED_EX}Failed to download subtitles (HTTP {response.status_code}).")
             except Exception as e:
-                print(f"{Fore.LIGHTRED_EX}Unexpected error while downloading {name}: {e}")
-            
-            # Short cooldown to avoid server throttling
-            time.sleep(5)
-            # except Exception as e:
-            #     print(f"\n\nError while downloading {name}: \n\n{e}")
+                print(f"{Fore.LIGHTRED_EX}Error downloading subtitles: {e}")
+        elif not self.args.no_subtitles:
+            print(f"Skipping {name}.vtt (No VTT Found)")
+
+        # Download Video
+        video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
+        if not video_url:
+            print(f"{Fore.LIGHTRED_EX}Could not resolve valid video URL for {name}.")
+            return
+
+        try:
+            result = self.yt_dlp_download(
+                video_url,
+                episode["headers"],
+                f"{folder}{name}.mp4",
+            )
+            if not result:
+                # Capture fresh link and retry once
+                print(f"{Fore.LIGHTYELLOW_EX}Download failed. Retrying one more time with fresh links...")
+                self.configure_driver()
+                self.driver.get(episode["url"])
+                self.select_server(anime.download_type)
+                media_requests = self.capture_media_requests(anime.download_type)
+                self.driver.quit()
+                delattr(self, "driver")
+
+                if media_requests:
+                    episode.update(media_requests)
+                    video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
+                    self.yt_dlp_download(video_url, episode["headers"], f"{folder}{name}.mp4")
+        except Exception as e:
+            print(f"{Fore.LIGHTRED_EX}Unexpected error: {e}")
+
+        # Short cooldown
+        time.sleep(5)
 
     def get_download_type(self):
         default_type = getattr(self.args, "download_type", "sub")
