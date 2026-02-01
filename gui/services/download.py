@@ -3,7 +3,7 @@
 import requests
 from dataclasses import dataclass
 from queue import Queue
-from threading import Thread
+from threading import Thread, Event
 from typing import Any, Optional
 from urllib.parse import urljoin
 
@@ -53,9 +53,10 @@ class DownloadService:
         self._extractor: Optional[GUIHianimeExtractor] = None
         self.title_trans = str.maketrans("", "", "".join(self.BAD_TITLE_CHARS))
 
-        # Pending subtitle selection (for dialog interaction)
-        self._pending_subtitle_selection: Optional[list[str]] = None
-        self._subtitle_selection_result: Optional[str] = None
+        # Subtitle selection synchronization
+        self._subtitle_event = Event()
+        self._subtitle_options: Optional[list[str]] = None
+        self._subtitle_selection: Optional[str] = None
 
         # Start queue polling
         self._poll_queue()
@@ -174,17 +175,57 @@ class DownloadService:
         Callback for subtitle selection.
 
         This is called from the background thread when multiple subtitles are found.
-        It emits an event and waits for the GUI to respond.
+        It emits an event and waits for the GUI to respond via set_subtitle_selection().
         """
-        # For now, just select the first one automatically
-        # Full dialog integration would require more complex synchronization
-        if subtitles:
+        if not subtitles:
+            return None
+
+        if len(subtitles) == 1:
+            return subtitles[0]
+
+        # Reset the event and store options
+        self._subtitle_event.clear()
+        self._subtitle_options = subtitles
+        self._subtitle_selection = None
+
+        # Emit event to notify GUI to show dialog
+        self._emit(EventType.SUBTITLE_CHOICE_NEEDED, {
+            "subtitles": subtitles,
+        })
+
+        self._emit(EventType.LOG_MESSAGE, {
+            "message": f"Multiple subtitles found ({len(subtitles)}), waiting for selection...",
+            "level": "INFO",
+        })
+
+        # Wait for GUI to set the selection (with timeout)
+        self._subtitle_event.wait(timeout=120)  # 2 minute timeout
+
+        result = self._subtitle_selection
+        self._subtitle_options = None
+        self._subtitle_selection = None
+
+        if result:
             self._emit(EventType.LOG_MESSAGE, {
-                "message": f"Multiple subtitles found ({len(subtitles)}), selecting first",
+                "message": "Subtitle selected",
                 "level": "INFO",
             })
-            return subtitles[0]
-        return None
+        else:
+            self._emit(EventType.LOG_MESSAGE, {
+                "message": "No subtitle selected, skipping",
+                "level": "WARN",
+            })
+
+        return result
+
+    def set_subtitle_selection(self, selection: Optional[str]):
+        """
+        Set the subtitle selection from the GUI.
+
+        This should be called by the GUI after the user makes a selection in the dialog.
+        """
+        self._subtitle_selection = selection
+        self._subtitle_event.set()
 
     def _download_worker(self, config: DownloadConfig):
         """Background worker for download operation using GUIHianimeExtractor."""
