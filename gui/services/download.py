@@ -3,8 +3,8 @@
 import requests
 from dataclasses import dataclass
 from queue import Queue
-from threading import Thread, Event
-from typing import Any, Optional
+from threading import Thread, Event as ThreadEvent
+from typing import Any, Literal, Optional
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
@@ -54,9 +54,14 @@ class DownloadService:
         self.title_trans = str.maketrans("", "", "".join(self.BAD_TITLE_CHARS))
 
         # Subtitle selection synchronization
-        self._subtitle_event = Event()
+        self._subtitle_event = ThreadEvent()
         self._subtitle_options: Optional[list[str]] = None
         self._subtitle_selection: Optional[str] = None
+
+        # Retry prompt synchronization
+        self._retry_event = ThreadEvent()
+        self._retry_message: Optional[str] = None
+        self._retry_result: Optional[Literal["retry", "skip", "abort"]] = None
 
         # Start queue polling
         self._poll_queue()
@@ -227,6 +232,58 @@ class DownloadService:
         self._subtitle_selection = selection
         self._subtitle_event.set()
 
+    def _retry_callback(self, message: str) -> bool:
+        """
+        Callback for retry prompts.
+
+        This is called from the background thread when an error occurs and retry is possible.
+        It emits an event and waits for the GUI to respond via set_retry_result().
+
+        Returns:
+            True to retry, False to skip
+        """
+        # Reset the event and store message
+        self._retry_event.clear()
+        self._retry_message = message
+        self._retry_result = None
+
+        # Emit event to notify GUI to show dialog
+        self._emit(EventType.RETRY_PROMPT, {
+            "message": message,
+        })
+
+        self._emit(EventType.LOG_MESSAGE, {
+            "message": f"Error: {message} - waiting for user decision...",
+            "level": "WARN",
+        })
+
+        # Wait for GUI to set the result (with timeout)
+        self._retry_event.wait(timeout=300)  # 5 minute timeout
+
+        result = self._retry_result
+        self._retry_message = None
+        self._retry_result = None
+
+        if result == "retry":
+            self._emit(EventType.LOG_MESSAGE, {"message": "Retrying...", "level": "INFO"})
+            return True
+        elif result == "abort":
+            self._emit(EventType.LOG_MESSAGE, {"message": "Aborting download", "level": "WARN"})
+            self.cancel()
+            return False
+        else:  # skip
+            self._emit(EventType.LOG_MESSAGE, {"message": "Skipping...", "level": "INFO"})
+            return False
+
+    def set_retry_result(self, result: Literal["retry", "skip", "abort"]):
+        """
+        Set the retry result from the GUI.
+
+        This should be called by the GUI after the user makes a decision in the error dialog.
+        """
+        self._retry_result = result
+        self._retry_event.set()
+
     def _download_worker(self, config: DownloadConfig):
         """Background worker for download operation using GUIHianimeExtractor."""
         try:
@@ -250,6 +307,7 @@ class DownloadService:
             self._extractor = GUIHianimeExtractor(
                 events=extractor_events,
                 subtitle_callback=self._subtitle_selection_callback,
+                retry_callback=self._retry_callback,
             )
 
             # Build the download config for the extractor
