@@ -26,10 +26,20 @@ class DownloadOptions:
 class OptionsFrame(ctk.CTkFrame):
     """Frame containing download configuration options."""
 
-    def __init__(self, master, default_output_dir: str = "output", **kwargs):
+    # Default servers for HiAnime
+    DEFAULT_SERVERS = ["HD-1", "HD-2", "Streamtape", "MegaCloud", "StreamSB"]
+
+    def __init__(
+        self,
+        master,
+        default_output_dir: str = "output",
+        servers: Optional[list[str]] = None,
+        **kwargs
+    ):
         super().__init__(master, **kwargs)
         self.default_output_dir = default_output_dir
         self.current_anime: Optional[AnimeResult] = None
+        self.server_values = servers if servers else self.DEFAULT_SERVERS.copy()
 
         self._create_widgets()
 
@@ -64,12 +74,12 @@ class OptionsFrame(ctk.CTkFrame):
         self.type_menu.pack(side="left", padx=(0, 20))
 
         ctk.CTkLabel(row1, text="Server:").pack(side="left", padx=(0, 5))
-        self.server_var = ctk.StringVar(value="HD-2")
+        self.server_var = ctk.StringVar(value=self.server_values[1] if len(self.server_values) > 1 else self.server_values[0])
         self.server_menu = ctk.CTkOptionMenu(
             row1,
-            values=["HD-1", "HD-2"],
+            values=self.server_values,
             variable=self.server_var,
-            width=100,
+            width=120,
         )
         self.server_menu.pack(side="left")
 
@@ -226,3 +236,27 @@ class OptionsFrame(ctk.CTkFrame):
         else:
             self.start_ep_entry.configure(state="disabled")
             self.end_ep_entry.configure(state="disabled")
+
+    def update_servers(self, servers: list[str], default: Optional[str] = None):
+        """Update the server list dynamically.
+
+        Args:
+            servers: New list of server names
+            default: Default server to select (optional)
+        """
+        if not servers:
+            return
+
+        self.server_values = servers
+        current = self.server_var.get()
+
+        # Update the menu values
+        self.server_menu.configure(values=servers)
+
+        # Keep current selection if it's still valid, otherwise use default or first
+        if current in servers:
+            pass  # Keep current
+        elif default and default in servers:
+            self.server_var.set(default)
+        else:
+            self.server_var.set(servers[0])

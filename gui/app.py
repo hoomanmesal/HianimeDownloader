@@ -94,14 +94,17 @@ class HianimeGUI(ctk.CTk):
 
         # Options frame
         default_output = self.config.get("output_dir", "output")
+        hianime_config = self.config.get("hianime", {})
+        custom_servers = hianime_config.get("servers", None)
+
         self.options_frame = OptionsFrame(
             main_container,
             default_output_dir=default_output,
+            servers=custom_servers,
         )
         self.options_frame.pack(fill="x", pady=(0, 10))
 
         # Apply config defaults
-        hianime_config = self.config.get("hianime", {})
         if "type" in hianime_config:
             self.options_frame.type_var.set(hianime_config["type"])
         if "server" in hianime_config:
