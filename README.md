@@ -1,4 +1,4 @@
-# GDown
+# GDownloader
 
 A simple CLI tool for downloading content from the streaming platform [hianime.to](hianime.to) + [social media platfroms](#supported-platforms). \
 This tool works best if you have a VPN installed with Adblock support, as I have not been able to get a working ad
@@ -46,6 +46,24 @@ blocker working with the chrome session.
       python3 main.py
      ```
 
+5. **Configuration (Optional)**
+   You can create a `config.json` file in the root directory to set your preferred defaults.
+
+   ```json
+   {
+     "hianime": {
+       "server": "HD-2",
+       "type": "sub"
+     },
+     "output_dir": "~/Downloads/Video",
+     "aria": true,
+     "no_subtitles": false
+   }
+   ```
+
+   - `output_dir` supports `~` for the home directory.
+   - `aria` set to `true` uses aria2c for much faster and more reliable downloads.
+
 ## Usage
 
 - Update the repository before running (as it is still being worked on)
@@ -62,14 +80,11 @@ blocker working with the chrome session.
 
 ### Downloading From HiAnime
 
-- Next you will be prompted to either select which version of the anime you would like; either sub or dub. If only one
-  was available, it will be automatically selected for you.
-- The next two prompts ask which episodes you want to download. You first provide the first episode, then the last
-  episode you would like to download (both values are inclusive)
+- Next you will be prompted to select which version of the anime you would like (sub or dub). If a default is set in `config.json`, it will be shown in brackets (e.g., `[sub]`). You can just press **Enter** to accept it.
+- The next two prompts ask which episodes you want to download. You first provide the first episode, then the last episode you would like to download (both values are inclusive).
 - The next prompt asks what season in the series this content is as an integer.
-- The final prompt asks you which of the streaming servers you would like to download from (HD-1, HD-2, etc.)
-- **Note** if a redirect ad to a second tab is created, close the second tab manually and refresh the original site to
-  continue download. (This will hopefully be patched eventually)
+- The final prompt asks you which streaming server you would like to use. If a default server is set in your config or via `--server`, it will be highlighted as the default (e.g., `Server [2]:`). You can press **Enter** to select it or type a different number.
+- **Note**: If a redirect ad to a second tab is created, close the second tab manually and refresh the original site to continue.
 
 ### Downloading from other platforms
 
@@ -91,9 +106,13 @@ You are able to pass parameters when running the file to add additional options.
 
 - `--no-subtitles` downloads the content without looking for subtitle files
 
-- `--server` allows you to select the streaming server you would like to downlaod from.
+- `--server` allows you to select the streaming server you would like to download from.
 
-- `--aria` uses the aria2c downloader for yt-dlp to download the content (untested)
+- `-t` or `--type` sets the download type (`sub` or `dub`).
+
+- `--aria` uses the aria2c downloader for yt-dlp. Highly recommended for unstable connections.
+
+- `--last` repeats the last successful download session, including anime link, episodes, and season number.
 
 ### Usage Example
 
