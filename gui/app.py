@@ -8,6 +8,7 @@ from gui.frames.results import ResultsFrame, AnimeResult
 from gui.frames.options import OptionsFrame
 from gui.frames.progress import ProgressFrame
 from gui.frames.logs import LogFrame
+from gui.dialogs.subtitle import SubtitleDialog
 from gui.services.download import DownloadService, DownloadConfig
 from gui.services.events import EventType
 from tools.config import load_config
@@ -61,6 +62,9 @@ class HianimeGUI(ctk.CTk):
         events.on(EventType.CAPTURE_START, self._on_capture_start)
         events.on(EventType.CAPTURE_PROGRESS, self._on_capture_progress)
         events.on(EventType.CAPTURE_COMPLETE, self._on_capture_complete)
+
+        # User interaction events
+        events.on(EventType.SUBTITLE_CHOICE_NEEDED, self._on_subtitle_choice_needed)
 
         # Status events
         events.on(EventType.STATUS_UPDATE, self._on_status_update)
@@ -306,6 +310,24 @@ class HianimeGUI(ctk.CTk):
             self.log_frame.log_success(message)
         else:
             self.log_frame.log_info(message)
+
+    def _on_subtitle_choice_needed(self, data: dict[str, Any]):
+        """Handle subtitle choice needed event - show dialog."""
+        subtitles = data.get("subtitles", [])
+        if not subtitles:
+            self.download_service.set_subtitle_selection(None)
+            return
+
+        # Show subtitle selection dialog
+        dialog = SubtitleDialog(
+            self,
+            subtitles=subtitles,
+            title="Select Subtitle Track",
+        )
+        selected = dialog.get_result()
+
+        # Send selection back to the download service
+        self.download_service.set_subtitle_selection(selected)
 
 
 def main():
