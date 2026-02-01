@@ -105,15 +105,33 @@ class HianimeGUI(ctk.CTk):
         if self.config.get("no_subtitles", False):
             self.options_frame.subtitles_var.set(False)
 
+        # Button container
+        btn_container = ctk.CTkFrame(main_container, fg_color="transparent")
+        btn_container.pack(fill="x", pady=(0, 10))
+
         # Download button
         self.download_btn = ctk.CTkButton(
-            main_container,
+            btn_container,
             text="Start Download",
             height=40,
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self._on_download,
         )
-        self.download_btn.pack(fill="x", pady=(0, 10))
+        self.download_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        # Cancel button
+        self.cancel_btn = ctk.CTkButton(
+            btn_container,
+            text="Cancel",
+            height=40,
+            width=100,
+            font=ctk.CTkFont(size=14),
+            fg_color="#8B0000",
+            hover_color="#A52A2A",
+            state="disabled",
+            command=self._on_cancel,
+        )
+        self.cancel_btn.pack(side="right")
 
         # Progress frame
         self.progress_frame = ProgressFrame(main_container)
@@ -166,6 +184,11 @@ class HianimeGUI(ctk.CTk):
         config = DownloadConfig(anime=anime, options=options)
         self.download_service.download(config)
 
+    def _on_cancel(self):
+        """Handle cancel button click."""
+        self.download_service.cancel()
+        self.cancel_btn.configure(state="disabled")
+
     # Event handlers
 
     def _on_search_start(self, data: dict[str, Any]):
@@ -187,6 +210,7 @@ class HianimeGUI(ctk.CTk):
     def _on_download_start(self, data: dict[str, Any]):
         """Handle download start event."""
         self.download_btn.configure(state="disabled", text="Downloading...")
+        self.cancel_btn.configure(state="normal")
         self.search_frame.set_loading(True)
         self.options_frame.set_enabled(False)
         self.progress_frame.reset()
@@ -204,17 +228,21 @@ class HianimeGUI(ctk.CTk):
     def _on_download_complete(self, data: dict[str, Any]):
         """Handle download complete event."""
         self.download_btn.configure(state="normal", text="Start Download")
+        self.cancel_btn.configure(state="disabled")
         self.search_frame.set_loading(False)
         self.options_frame.set_enabled(True)
         self.progress_frame.set_status("Download complete!")
         self.progress_frame.set_progress(1.0)
+        self.progress_frame.set_indeterminate(False)
 
     def _on_download_error(self, data: dict[str, Any]):
         """Handle download error event."""
         self.download_btn.configure(state="normal", text="Start Download")
+        self.cancel_btn.configure(state="disabled")
         self.search_frame.set_loading(False)
         self.options_frame.set_enabled(True)
         self.progress_frame.set_status("Error occurred")
+        self.progress_frame.set_indeterminate(False)
 
     def _on_episode_start(self, data: dict[str, Any]):
         """Handle episode start event."""
