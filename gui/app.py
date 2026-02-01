@@ -57,6 +57,11 @@ class HianimeGUI(ctk.CTk):
         events.on(EventType.EPISODE_START, self._on_episode_start)
         events.on(EventType.EPISODE_COMPLETE, self._on_episode_complete)
 
+        # Capture events
+        events.on(EventType.CAPTURE_START, self._on_capture_start)
+        events.on(EventType.CAPTURE_PROGRESS, self._on_capture_progress)
+        events.on(EventType.CAPTURE_COMPLETE, self._on_capture_complete)
+
         # Status events
         events.on(EventType.STATUS_UPDATE, self._on_status_update)
         events.on(EventType.LOG_MESSAGE, self._on_log_message)
@@ -221,7 +226,38 @@ class HianimeGUI(ctk.CTk):
 
     def _on_episode_complete(self, data: dict[str, Any]):
         """Handle episode complete event."""
-        pass  # Log message handles this
+        current = data.get("current", 0)
+        total = data.get("total", 0)
+        # Update overall progress based on completed episodes
+        if total > 0:
+            overall_progress = current / total
+            self.progress_frame.set_progress(overall_progress)
+
+    def _on_capture_start(self, data: dict[str, Any]):
+        """Handle capture start event."""
+        episode = data.get("episode", 0)
+        self.progress_frame.set_status(f"Capturing Episode {episode}...")
+        self.progress_frame.set_indeterminate(True)
+
+    def _on_capture_progress(self, data: dict[str, Any]):
+        """Handle capture progress event."""
+        attempt = data.get("attempt", 0)
+        max_attempts = data.get("max_attempts", 45)
+        found_video = data.get("found_video", False)
+        found_subtitle = data.get("found_subtitle", False)
+
+        status_parts = [f"Capturing... ({attempt}/{max_attempts})"]
+        if found_video:
+            status_parts.append("[Video OK]")
+        if found_subtitle:
+            status_parts.append("[Subtitle OK]")
+
+        self.progress_frame.set_details(" ".join(status_parts))
+
+    def _on_capture_complete(self, data: dict[str, Any]):
+        """Handle capture complete event."""
+        self.progress_frame.set_indeterminate(False)
+        self.progress_frame.set_details("")
 
     def _on_status_update(self, data: dict[str, Any]):
         """Handle status update event."""

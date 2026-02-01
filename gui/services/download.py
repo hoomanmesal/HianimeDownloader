@@ -1,8 +1,6 @@
 """Download service that wraps extractors for GUI use."""
 
-import os
 import requests
-from argparse import Namespace
 from dataclasses import dataclass
 from queue import Queue
 from threading import Thread
@@ -12,6 +10,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup, Tag
 
 from gui.services.events import Event, EventEmitter, EventType
+from gui.services.extractor_adapter import GUIHianimeExtractor, GUIDownloadConfig
 from gui.frames.results import AnimeResult
 from gui.frames.options import DownloadOptions
 
@@ -51,7 +50,12 @@ class DownloadService:
         self.message_queue: Queue[tuple[EventType, dict[str, Any]]] = Queue()
         self._is_running = False
         self._current_thread: Optional[Thread] = None
+        self._extractor: Optional[GUIHianimeExtractor] = None
         self.title_trans = str.maketrans("", "", "".join(self.BAD_TITLE_CHARS))
+
+        # Pending subtitle selection (for dialog interaction)
+        self._pending_subtitle_selection: Optional[list[str]] = None
+        self._subtitle_selection_result: Optional[str] = None
 
         # Start queue polling
         self._poll_queue()
@@ -136,7 +140,7 @@ class DownloadService:
                         sub_episodes=sub_episodes,
                         dub_episodes=dub_episodes,
                     ))
-                except Exception as e:
+                except Exception:
                     # Skip malformed entries
                     continue
 
@@ -165,12 +169,25 @@ class DownloadService:
         self._current_thread = Thread(target=self._download_worker, args=(config,), daemon=True)
         self._current_thread.start()
 
-    def _download_worker(self, config: DownloadConfig):
-        """Background worker for download operation.
-
-        This is a placeholder that will be expanded to integrate with
-        the actual HianimeExtractor download functionality.
+    def _subtitle_selection_callback(self, subtitles: list[str]) -> Optional[str]:
         """
+        Callback for subtitle selection.
+
+        This is called from the background thread when multiple subtitles are found.
+        It emits an event and waits for the GUI to respond.
+        """
+        # For now, just select the first one automatically
+        # Full dialog integration would require more complex synchronization
+        if subtitles:
+            self._emit(EventType.LOG_MESSAGE, {
+                "message": f"Multiple subtitles found ({len(subtitles)}), selecting first",
+                "level": "INFO",
+            })
+            return subtitles[0]
+        return None
+
+    def _download_worker(self, config: DownloadConfig):
+        """Background worker for download operation using GUIHianimeExtractor."""
         try:
             self._emit(EventType.DOWNLOAD_START, {
                 "anime": config.anime.name,
@@ -181,75 +198,70 @@ class DownloadService:
                 "level": "INFO",
             })
 
-            # Build args namespace for extractor
-            args = Namespace(
-                link=config.anime.url,
-                output_dir=config.options.output_dir,
-                type=config.options.download_type,
-                server=config.options.server,
-                aria=config.options.use_aria,
-                no_subtitles=not config.options.download_subtitles,
-                filename=None,
+            # Create extractor-specific event emitter that routes to our queue
+            extractor_events = EventEmitter()
+
+            # Forward all events from extractor to our queue
+            for event_type in EventType:
+                extractor_events.on(event_type, lambda data, et=event_type: self._emit(et, data))
+
+            # Create the GUI extractor adapter
+            self._extractor = GUIHianimeExtractor(
+                events=extractor_events,
+                subtitle_callback=self._subtitle_selection_callback,
             )
 
-            # For now, emit a placeholder message
-            # Full integration with HianimeExtractor will require refactoring
-            # the extractor to support callbacks instead of print statements
-            self._emit(EventType.LOG_MESSAGE, {
-                "message": "Download service initialized. Full extractor integration pending.",
-                "level": "INFO",
-            })
+            # Build the download config for the extractor
+            extractor_config = GUIDownloadConfig(
+                anime_url=config.anime.url,
+                anime_name=config.anime.name,
+                sub_episodes=config.anime.sub_episodes,
+                dub_episodes=config.anime.dub_episodes,
+                download_type=config.options.download_type,
+                server=config.options.server,
+                season=config.options.season,
+                start_episode=config.options.start_episode,
+                end_episode=config.options.end_episode,
+                output_dir=config.options.output_dir,
+                download_subtitles=config.options.download_subtitles,
+                use_aria=config.options.use_aria,
+            )
 
-            total_episodes = config.options.end_episode - config.options.start_episode + 1
-            for i, ep_num in enumerate(range(config.options.start_episode, config.options.end_episode + 1), 1):
-                self._emit(EventType.EPISODE_START, {
-                    "episode": ep_num,
-                    "current": i,
-                    "total": total_episodes,
-                })
-                self._emit(EventType.STATUS_UPDATE, {
-                    "status": f"Episode {ep_num} ({i}/{total_episodes})",
-                })
+            # Run the download
+            results = self._extractor.download(extractor_config)
 
-                # Placeholder progress simulation
-                # In real implementation, this would call extractor methods
-                import time
-                for progress in range(0, 101, 10):
-                    self._emit(EventType.DOWNLOAD_PROGRESS, {
-                        "percent": progress / 100,
-                        "speed": "-- MB/s",
-                        "eta": "--:--",
-                    })
-                    time.sleep(0.1)
-
-                self._emit(EventType.EPISODE_COMPLETE, {
-                    "episode": ep_num,
-                    "current": i,
-                    "total": total_episodes,
-                })
-                self._emit(EventType.LOG_MESSAGE, {
-                    "message": f"Episode {ep_num} complete (simulated)",
-                    "level": "OK",
-                })
+            # Summarize results
+            successful = sum(1 for r in results if r.success)
+            failed = sum(1 for r in results if not r.success)
+            skipped = sum(1 for r in results if r.already_exists)
 
             self._emit(EventType.DOWNLOAD_COMPLETE, {
                 "anime": config.anime.name,
-                "total_episodes": total_episodes,
+                "total": len(results),
+                "successful": successful,
+                "failed": failed,
+                "skipped": skipped,
             })
-            self._emit(EventType.LOG_MESSAGE, {
-                "message": "Download complete!",
-                "level": "OK",
-            })
+
+            summary = f"Download complete: {successful} successful"
+            if skipped > 0:
+                summary += f", {skipped} skipped"
+            if failed > 0:
+                summary += f", {failed} failed"
+
+            self._emit(EventType.LOG_MESSAGE, {"message": summary, "level": "OK"})
 
         except Exception as e:
             self._emit(EventType.DOWNLOAD_ERROR, {"error": str(e)})
             self._emit(EventType.LOG_MESSAGE, {"message": f"Download error: {e}", "level": "ERROR"})
         finally:
+            self._extractor = None
             self._is_running = False
 
     def cancel(self):
         """Cancel the current operation."""
-        # TODO: Implement proper cancellation
+        if self._extractor:
+            self._extractor.cancel()
         self._is_running = False
         self._emit(EventType.LOG_MESSAGE, {"message": "Operation cancelled", "level": "WARN"})
 
