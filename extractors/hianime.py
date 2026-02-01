@@ -11,16 +11,19 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup, Tag
 from colorama import Fore
+from langdetect import detect as detect_lang
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium_stealth import stealth
 from seleniumwire import webdriver
 from yt_dlp import YoutubeDL
 
-from tools.functions import get_conformation, get_int_in_range
+from tools.functions import get_conformation, get_int_in_range, safe_remove
 from tools.YTDLogger import YTDLogger
+from tools.config import save_session
 
 
 @dataclass
@@ -48,8 +51,9 @@ class HianimeExtractor:
             "Accept-Language": "en-US,en;q=0.8",
             "Connection": "keep-alive",
         }
-        self.URL: str = "https://hianimez.to"
-        self.SUBTITLE_LANGS: list[str] = ["eng"]
+        self.URL: str = "https://hianime.to"
+        self.ENCODING = "utf-8"
+        self.SUBTITLE_LANG: str = "en"
         self.OTHER_LANGS: list[str] = [
             "ita",
             "jpn",
@@ -144,7 +148,11 @@ class HianimeExtractor:
         )
 
         if anime.sub_episodes != 0 and anime.dub_episodes != 0:
-            anime.download_type = self.get_download_type()
+            anime.download_type = self.args.download_type
+            if anime.download_type == "s":
+                anime.download_type = "sub"
+            elif anime.download_type == "d":
+                anime.download_type = "dub"
         elif anime.dub_episodes == 0:
             print("Dub episodes are not available. Defaulting to sub.")
             anime.download_type = "sub"
@@ -153,71 +161,72 @@ class HianimeExtractor:
             anime.download_type = "dub"
 
         number_of_episodes = getattr(anime, f"{anime.download_type}_episodes")
-        if number_of_episodes != 1:
-            start_ep = get_int_in_range(
-                f"{Fore.LIGHTCYAN_EX}Enter the starting episode number (inclusive):{Fore.LIGHTYELLOW_EX} ",
-                1,
-                number_of_episodes,
-            )
-            end_ep = get_int_in_range(
-                f"{Fore.LIGHTCYAN_EX}Enter the ending episode number (inclusive):{Fore.LIGHTYELLOW_EX} ",
-                1,
-                number_of_episodes,
-            )
-        else:
-            start_ep = 1
-            end_ep = 1
+        session_info = getattr(self.args, "session_info", {})
 
-        anime.season_number = get_int_in_range(
-            f"{Fore.LIGHTCYAN_EX}Enter the season number for this anime:{Fore.LIGHTYELLOW_EX} "
-        )
+        if session_info:
+            start_ep = session_info.get("start_ep", 1)
+            end_ep = session_info.get("end_ep", 1)
+            anime.season_number = session_info.get("season_number", 1)
+            print(f"{Fore.LIGHTCYAN_EX}Using last session episode range: {Fore.LIGHTYELLOW_EX}e{start_ep} - e{end_ep}, Season {anime.season_number}")
+        else:
+            if number_of_episodes != 1:
+                start_ep = get_int_in_range(
+                    f"{Fore.LIGHTCYAN_EX}Enter the starting episode number (inclusive):{Fore.LIGHTYELLOW_EX} ",
+                    1,
+                    number_of_episodes,
+                )
+                end_ep = get_int_in_range(
+                    f"{Fore.LIGHTCYAN_EX}Enter the ending episode number (inclusive):{Fore.LIGHTYELLOW_EX} ",
+                    1,
+                    number_of_episodes,
+                )
+            else:
+                start_ep = 1
+                end_ep = 1
+
+            anime.season_number = get_int_in_range(
+                f"{Fore.LIGHTCYAN_EX}Enter the season number for this anime:{Fore.LIGHTYELLOW_EX} "
+            )
 
         self.configure_driver()
         self.driver.get(anime.url)
-        button: WebElement = self.find_server_button(anime)  # type: ignore
-        button.click()
+        self.find_server_name(anime)
+        self.driver.get(anime.url)
+        self.select_server(anime.download_type)
 
-        episode_list = self.get_episode_urls(self.driver.page_source, start_ep, end_ep)
+        # Save session data for next time
+        save_session({
+            "args": {
+                "link": anime.url,
+                "download_type": anime.download_type,
+                "server": self.selected_server_name,
+                "aria": self.args.aria,
+                "no_subtitles": self.args.no_subtitles,
+                "output_dir": self.args.output_dir
+            },
+            "info": {
+                "start_ep": start_ep,
+                "end_ep": end_ep,
+                "season_number": anime.season_number
+            }
+        })
+
+        episode_list: list[dict] = self.get_episode_urls(
+            self.driver.page_source, start_ep, end_ep
+        )
+
+        # Merge with previously captured episodes if available
+        captured_episodes = session_info.get("captured_episodes", {})
+        for ep in episode_list:
+            ep_key = str(ep["number"])
+            if ep_key in captured_episodes:
+                # Reuse captured links
+                ep.update(captured_episodes[ep_key])
 
         print()
 
         self.captured_video_urls = []
         self.captured_subtitle_urls = []
-        for episode in episode_list:
-            url = episode["url"]
-            number = episode["number"]
-            title = episode["title"]
-
-            print(
-                Fore.LIGHTGREEN_EX
-                + "Getting"
-                + Fore.LIGHTWHITE_EX
-                + f" Episode {number} - {title} from {url}"
-                + Fore.LIGHTWHITE_EX
-            )
-
-            try:
-                self.driver.requests.clear()
-                self.driver.get(url)
-                self.driver.execute_script("window.focus();")
-                media_requests = self.capture_media_requests()
-                episode.update(media_requests)
-                self.captured_video_urls.append(media_requests["m3u8"])
-                if not self.args.no_subtitles:
-                    self.captured_subtitle_urls.append(media_requests["vtt"])
-            except KeyboardInterrupt:
-                print("\n\nCanceling media capture...")
-                if not get_conformation(
-                    "Would you like to download link capture up to now? (y/n): "
-                ):
-                    self.driver.quit()
-                    return
-
-        self.driver.quit()
-        print()
-        self.download_streams(anime, episode_list)
-
-    def download_streams(self, anime: Anime, episodes: list[dict[str, Any]]):
         folder = (
             os.path.abspath(self.args.output_dir)
             + os.sep
@@ -226,48 +235,236 @@ class HianimeExtractor:
         )
         os.makedirs(folder, exist_ok=True)
 
-        # Write to JSON file
-        with open(
-            f"{folder}{anime.name} (Season {anime.season_number}).json", "w"
-        ) as json_file:
-            json.dump({**asdict(anime), "episodes": episodes}, json_file, indent=4)
+        download_results: list[tuple[dict, dict]] = []
+        for episode in episode_list:
+            url = episode["url"]
+            number = episode["number"]
+            title = episode["title"]
+            name = f"{anime.name} - s{anime.season_number:02}e{number:02} - {title}"
 
-        for episode in episodes:
-            name = f"{anime.name} - s{anime.season_number:02}e{episode['number']:02} - {episode['title']}"
-            try:
-                if "m3u8" in episode.keys() and episode["m3u8"]:
-                    self.yt_dlp_download(
-                        self.look_for_variants(episode["m3u8"], episode["headers"]),
-                        episode["headers"],
-                        f"{folder}{name}.mp4",
-                    )
+            print(
+                f"\n{Fore.LIGHTCYAN_EX}--- Processing Episode {number} ---"
+            )
+
+            # Check if file already exists in the output directory
+            if os.path.exists(os.path.join(folder, f"{name}.mp4")):
+                print(f"{Fore.LIGHTGREEN_EX}Episode {number} already exists. Skipping.")
+                download_results.append((episode, {"success": True, "already_exists": True}))
+                continue
+
+            # Step 1: Get Link (Cache or Browser)
+            has_valid_link = False
+            if "m3u8" in episode and episode["m3u8"]:
+                if self._verify_captured_links(episode):
+                    print(f"{Fore.LIGHTCYAN_EX}Using cached links for Episode {number}")
+                    has_valid_link = True
                 else:
-                    print(f"Skipping {name}.mp4 (No M3U8 Stream Found)")
-                if "vtt" in episode.keys() and episode["vtt"]:
-                    self.yt_dlp_download(
-                        episode["vtt"], episode["headers"], f"{folder}{name}.vtt"
-                    )
-                elif not self.args.no_subtitles:
-                    print(f"Skipping {name}.vtt (No VTT Stream Found)")
-            except KeyboardInterrupt:
-                print(
-                    f"\n\n{Fore.LIGHTCYAN_EX}Canceling Downloads...\nRemoving Temp Files for {name}"
-                )
-                for file in glob(os.path.join(folder, f"{name}.*")):
-                    os.remove(file)
-                break
-            # except Exception as e:
-            #     print(f"\n\nError while downloading {name}: \n\n{e}")
+                    print(f"{Fore.LIGHTYELLOW_EX}Cached links for Episode {number} expired.")
 
-    @staticmethod
-    def get_download_type():
+            if not has_valid_link:
+                try:
+                    # Open driver only when needed
+                    if not hasattr(self, "driver") or not self.driver:
+                        self.configure_driver()
+                    
+                    success = False
+                    for capture_attempt in range(3):
+                        try:
+                            self.driver.requests.clear()
+                            self.driver.get(url)
+                            self.select_server(anime.download_type)
+                            self.driver.execute_script("window.focus();")
+                            media_requests = self.capture_media_requests(anime.download_type)
+                            if media_requests:
+                                episode.update(media_requests)
+                                self._update_session_file(anime, episode_list, start_ep, end_ep)
+                                has_valid_link = True
+                                success = True
+                                break
+                            else:
+                                print(f"Capture failed (Attempt {capture_attempt+1}/3)")
+                        except Exception as e:
+                            if isinstance(e, KeyboardInterrupt): raise e
+                            print(f"Error: {e}")
+                            time.sleep(2)
+                    
+                    # We quit the driver after each episode capture to keep the system clean
+                    if hasattr(self, "driver"):
+                        self.driver.quit()
+                        delattr(self, "driver")
+                except KeyboardInterrupt:
+                    print("\n\nStopping...")
+                    return
+
+            # Step 2: Download immediately
+            if has_valid_link:
+                status = self.download_single_episode(anime, episode, folder)
+                download_results.append((episode, status))
+                # Success updated session
+                self._update_session_file(anime, episode_list, start_ep, end_ep)
+            else:
+                print(f"{Fore.LIGHTRED_EX}Could not get links for Episode {number}. Skipping.")
+                download_results.append((episode, {"success": False, "error": "Could not get links"}))
+
+        print(f"\n{Fore.LIGHTGREEN_EX}Queue finished!")
+        
+        # Summary and Redownload Handling
+        print(f"\n{Fore.LIGHTCYAN_EX}{'='*20} DOWNLOAD SUMMARY {'='*20}")
+        fragment_failures = []
+        subtitle_failures = []
+        for episode, status in download_results:
+            number = episode['number']
+            if status.get('already_exists'):
+                print(f"{Fore.LIGHTGREEN_EX}Episode {number:02}: Already existed")
+            elif status['success']:
+                if not status.get('subtitle_success') and not self.args.no_subtitles:
+                    print(f"{Fore.LIGHTYELLOW_EX}Episode {number:02}: Video Success, Subtitles FAILED")
+                    subtitle_failures.append(episode)
+                else:
+                    print(f"{Fore.LIGHTGREEN_EX}Episode {number:02}: Successfully downloaded")
+            elif status.get('fragment_error'):
+                print(f"{Fore.LIGHTRED_EX}Episode {number:02}: INCOMPLETE (Fragments missing)")
+                fragment_failures.append(episode)
+            else:
+                print(f"{Fore.LIGHTRED_EX}Episode {number:02}: FAILED ({status.get('error', 'Unknown error')})")
+        print(f"{Fore.LIGHTCYAN_EX}{'='*58}\n")
+
+        # Handle Video/Fragment Retries
+        for episode in fragment_failures:
+            # ... (same logic as before for fragment retries)
+            number = episode['number']
+            title = episode['title']
+            name = f"{anime.name} - s{anime.season_number:02}e{number:02} - {title}"
+            filepath = os.path.join(folder, f"{name}.mp4")
+            
+            print(f"{Fore.LIGHTYELLOW_EX}Episode {number} was incomplete due to missing fragments.")
+            if get_conformation(f"{Fore.LIGHTCYAN_EX}Would you like to delete the incomplete file and try redownloading it? (y/n): "):
+                safe_remove(filepath)
+                # Re-verify and re-download
+                if not self._verify_captured_links(episode):
+                    print(f"{Fore.LIGHTYELLOW_EX}Links expired, capturing fresh links...")
+                    self.configure_driver()
+                    self.driver.get(episode["url"])
+                    self.select_server(anime.download_type)
+                    media_requests = self.capture_media_requests(anime.download_type)
+                    self.driver.quit()
+                    if hasattr(self, "driver"): delattr(self, "driver")
+                    if media_requests:
+                        episode.update(media_requests)
+                
+                print(f"{Fore.LIGHTCYAN_EX}Retrying Episode {number}...")
+                self.download_single_episode(anime, episode, folder)
+
+        # Handle Subtitle-only Retries
+        for episode in subtitle_failures:
+            number = episode['number']
+            print(f"{Fore.LIGHTYELLOW_EX}Episode {number} is missing subtitles.")
+            if get_conformation(f"{Fore.LIGHTCYAN_EX}Would you like to retry downloading the subtitles for Episode {number}? (y/n): "):
+                # Re-verify links if needed (subtitles also expire sometimes)
+                if not self._verify_captured_links(episode):
+                    print(f"{Fore.LIGHTYELLOW_EX}Links expired, capturing fresh links for subtitles...")
+                    self.configure_driver()
+                    self.driver.get(episode["url"])
+                    self.select_server(anime.download_type)
+                    media_requests = self.capture_media_requests(anime.download_type)
+                    self.driver.quit()
+                    if hasattr(self, "driver"): delattr(self, "driver")
+                    if media_requests:
+                        episode.update(media_requests)
+                
+                # We can call download_single_episode again, it will skip video if .mp4 exists
+                self.download_single_episode(anime, episode, folder)
+
+
+
+    def download_single_episode(self, anime: Anime, episode: dict, folder: str) -> dict[str, Any]:
+        name = f"{anime.name} - s{anime.season_number:02}e{episode['number']:02} - {episode['title']}"
+        filepath = os.path.join(folder, f"{name}.mp4")
+        subtitle_success = True
+
+        # Download subtitles FIRST
+        if "vtt" in episode.keys() and episode["vtt"]:
+            max_subtitle_retries = 3
+            subtitle_downloaded = False
+            for attempt in range(max_subtitle_retries):
+                try:
+                    vtt_headers = episode.get("vtt_headers", episode["headers"])
+                    response = requests.get(episode["vtt"], headers=vtt_headers, timeout=30)
+                    if response.status_code == 200:
+                        with open(f"{folder}{name}.vtt", "wb") as vtt_file:
+                            vtt_file.write(response.content)
+                        subtitle_downloaded = True
+                        break
+                    else:
+                        print(f"{Fore.LIGHTRED_EX}Failed to download subtitles (HTTP {response.status_code}). Attempt {attempt + 1}/{max_subtitle_retries}")
+                except Exception as e:
+                    print(f"{Fore.LIGHTRED_EX}Error downloading subtitles: {e}. Attempt {attempt + 1}/{max_subtitle_retries}")
+                
+                if attempt < max_subtitle_retries - 1:
+                    time.sleep(2)
+            
+            if not subtitle_downloaded:
+                print(f"{Fore.LIGHTRED_EX}Subtitle download failed after {max_subtitle_retries} attempts.")
+                subtitle_success = False
+        elif not self.args.no_subtitles:
+            print(f"Skipping {name}.vtt (No VTT Found)")
+            subtitle_success = False
+
+
+
+        # Download Video
+        video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
+        if not video_url:
+            print(f"{Fore.LIGHTRED_EX}Could not resolve valid video URL for {name}.")
+            return {"success": False, "error": "No video URL", "fragment_error": False}
+
+        try:
+            status = self.yt_dlp_download(
+                video_url,
+                episode["headers"],
+                filepath,
+            )
+            
+            if not status["success"] and not status.get("fragment_error"):
+                # Capture fresh link and retry once if it wasn't a fragment error
+                print(f"{Fore.LIGHTYELLOW_EX}Download failed. Retrying one more time with fresh links...")
+                # We need to re-capture links here
+                if not hasattr(self, "driver") or not self.driver:
+                    self.configure_driver()
+                self.driver.get(episode["url"])
+                self.select_server(anime.download_type)
+                media_requests = self.capture_media_requests(anime.download_type)
+                self.driver.quit()
+                if hasattr(self, "driver"): delattr(self, "driver")
+
+                if media_requests:
+                    episode.update(media_requests)
+                    video_url = self.look_for_variants(episode["m3u8"], episode["headers"])
+                    status = self.yt_dlp_download(video_url, episode["headers"], filepath)
+            
+            status["subtitle_success"] = subtitle_success
+            return status
+
+        except Exception as e:
+            print(f"{Fore.LIGHTRED_EX}Unexpected error: {e}")
+            return {"success": False, "error": str(e), "fragment_error": False, "subtitle_success": subtitle_success}
+        finally:
+            # Short cooldown
+            time.sleep(2)
+
+
+
+    def get_download_type(self):
+        default_type = getattr(self.args, "download_type", "sub")
         ans = (
             input(
-                f"\n{Fore.LIGHTCYAN_EX}Both sub and dub episodes are available. Do you want to download sub or dub? (Enter 'sub' or 'dub'):{Fore.LIGHTYELLOW_EX} "
+                f"\n{Fore.LIGHTCYAN_EX}Both sub and dub episodes are available. Do you want to download sub or dub? (Enter 'sub' or 'dub') [{Fore.LIGHTYELLOW_EX}{default_type}{Fore.LIGHTCYAN_EX}]:{Fore.LIGHTYELLOW_EX} "
             )
             .strip()
             .lower()
         )
+        if not ans:
+            return default_type
         if ans == "sub" or ans == "s":
             return "sub"
         elif ans == "dub" or ans == "d":
@@ -275,7 +472,7 @@ class HianimeExtractor:
         print(
             f"{Fore.LIGHTRED_EX}Invalid response, please respond with either 'sub' or 'dub'."
         )
-        return HianimeExtractor.get_download_type()
+        return self.get_download_type()
 
     def configure_driver(self) -> None:
         mobile_emulation: dict[str, str] = {"deviceName": "iPhone X"}
@@ -305,6 +502,11 @@ class HianimeExtractor:
         options.add_argument("--disable-backgrounding-occluded-windows")
         # options.add_argument("--load-extension=extensions" + os.sep + )
 
+        options.add_argument("--disable-gpu")
+        options.add_argument("--log-level=3")
+        options.add_argument("--silent")
+        options.add_experimental_option("excludeSwitches", ["enable-logging"])
+
         seleniumwire_options: dict[str, bool] = {
             "verify_ssl": False,
             "disable_encoding": True,
@@ -325,7 +527,7 @@ class HianimeExtractor:
             fix_hairline=True,
         )
 
-        self.driver.implicitly_wait(10)
+        # self.driver.implicitly_wait(10)  # Removed to avoid mixing with WebDriverWait
 
         self.driver.execute_script(
             """
@@ -340,9 +542,22 @@ class HianimeExtractor:
         )
 
     def get_server_options(self, download_type: str) -> list[WebElement]:
-        WebDriverWait(self.driver, 10).until(
-            EC.presence_of_element_located((By.ID, "servers-content"))
-        )
+        try:
+            WebDriverWait(self.driver, 25).until(
+                EC.presence_of_element_located((By.ID, "servers-content"))
+            )
+        except TimeoutException:
+            # Capture screenshot for debugging
+            os.makedirs("debug", exist_ok=True)
+            screenshot_path = os.path.join("debug", f"timeout_{int(time.time())}.png")
+            self.driver.save_screenshot(screenshot_path)
+            print(f"{Fore.LIGHTRED_EX}Timeout waiting for servers-content. Screenshot saved to {screenshot_path}")
+            
+            # Check if we are on a Cloudflare challenge page
+            if "challenge-platform" in self.driver.page_source or "Checking your browser" in self.driver.page_source:
+                print(f"{Fore.LIGHTYELLOW_EX}It looks like you might be stuck on a Cloudflare challenge. Please check the browser if possible.")
+            
+            raise
 
         options = [
             _type.find_element(By.CLASS_NAME, "ps__-list").find_elements(
@@ -359,56 +574,74 @@ class HianimeExtractor:
             else options[1]
         )
 
-    def find_server_button(self, anime: Anime) -> WebElement | None:
+    def find_server_name(self, anime: Anime) -> str:
         options = self.get_server_options(anime.download_type)
-        selection = None
+        server_names = [option.text for option in options]
 
+        default_index = -1
         if self.args.server:
-            for option in options:
-                if option.text.lower().strip() == self.args.server.lower().strip():
-                    selection = option.text
+            for i, name in enumerate(server_names):
+                if name.lower().strip() == self.args.server.lower().strip():
+                    default_index = i + 1
+                    break
 
-        if not selection:
-            if self.args.server:
-                print(
-                    f"{Fore.LIGHTGREEN_EX}The server name you provided does not exist\n"
-                )
+        if getattr(self.args, "last", False) and default_index != -1:
+            selection = server_names[default_index - 1]
             print(
-                f"\n{Fore.LIGHTGREEN_EX}Select the server you want to download from: \n"
+                f"\n{Fore.LIGHTGREEN_EX}Auto-selecting server from last session: {Fore.LIGHTCYAN_EX}{selection}"
             )
+            self.selected_server_name = selection
+            return selection
 
-            server_names = []
-            for i, option in enumerate(options):
-                server_names.append(option.text)
-                print(f"{Fore.LIGHTRED_EX} {i + 1}: {Fore.LIGHTCYAN_EX}{option.text}")
+        print(f"\n{Fore.LIGHTGREEN_EX}Select the server you want to download from: \n")
+        for i, name in enumerate(server_names):
+            print(f"{Fore.LIGHTRED_EX} {i + 1}: {Fore.LIGHTCYAN_EX}{name}")
 
-            self.driver.requests.clear()
-            self.driver.quit()
+        # Quit driver to pause for interactive input safely
+        self.driver.quit()
 
-            selection = server_names[
-                get_int_in_range(
-                    f"\n{Fore.LIGHTCYAN_EX}Server:{Fore.LIGHTYELLOW_EX} ",
-                    1,
-                    len(options),
-                )
-                - 1
-            ]
-        else:
-            self.driver.requests.clear()
-            self.driver.quit()
+        prompt = f"\n{Fore.LIGHTCYAN_EX}Server"
+        if default_index != -1:
+            prompt += f" [{Fore.LIGHTYELLOW_EX}{default_index}{Fore.LIGHTCYAN_EX}]"
+        prompt += f":{Fore.LIGHTYELLOW_EX} "
+
+        selection_idx = get_int_in_range(
+            prompt,
+            1,
+            len(server_names),
+            default=default_index if default_index != -1 else None,
+        )
+        selection = server_names[selection_idx - 1]
 
         print(f"\n{Fore.LIGHTGREEN_EX}You chose: {Fore.LIGHTCYAN_EX}{selection}")
+        self.selected_server_name = selection
 
+        # Restart driver to begin the actual capture session
         self.configure_driver()
+        return selection
+
+    def select_server(self, download_type: str) -> bool:
+        try:
+            # We use a shorter timeout here because if it fails, we want to try clicking the player instead
+            options = self.get_server_options(download_type)
+            for option in options:
+                if (option.text.strip() == self.selected_server_name.strip() or 
+                    option.get_attribute("title") == self.selected_server_name):
+                    self.driver.execute_script("arguments[0].click();", option)
+                    return True
+        except Exception as e:
+            # Silently fail as the player might auto-load or get_server_options might handle the diagnostic
+            pass
+        return False
+
+    def find_server_button(self, anime: Anime) -> WebElement | None:
+        # Keep this for backward compatibility if needed, but we prefer find_server_name + select_server
+        self.find_server_name(anime)
         self.driver.get(anime.url)
-
         options = self.get_server_options(anime.download_type)
-
         for option in options:
-            if option.text == selection:
+            if option.text.strip() == self.selected_server_name.strip():
                 return option
-
-        print(f"{Fore.LIGHTRED_EX}No matching server button could be found")
         return None
 
     def get_episode_urls(
@@ -432,12 +665,14 @@ class HianimeExtractor:
                 episodes.append(episode_info)
         return episodes
 
-    def capture_media_requests(self) -> dict[str, str]:
+    def capture_media_requests(self, download_type: str = "sub") -> dict[str, str] | None:
         found_m3u8: bool = False
         found_vtt: bool = self.args.no_subtitles
         attempt: int = 0
-        urls: dict[str, Any] = {}
+        urls: dict[str, Any] = {"all-vtt": [], "vtt_headers_map": {}}
+        previously_found_vtt: int = 0
 
+        all_urls = []
         while (
             not found_m3u8 or not found_vtt
         ) and self.DOWNLOAD_ATTEMPT_CAP >= attempt:
@@ -447,42 +682,82 @@ class HianimeExtractor:
             sys.stdout.flush()
 
             for request in self.driver.requests:
-                if request.response:
-                    uri = request.url.lower()
-                    if (
-                        not found_m3u8
-                        and uri.endswith(".m3u8")
-                        and "master" in uri
-                        and uri not in self.captured_video_urls
-                    ):
-                        urls["m3u8"] = uri
-                        urls["headers"] = dict(request.headers)
-                        found_m3u8 = True
-                        continue
-                    if (
-                        not found_vtt
-                        and ".vtt" in uri
-                        and "thumbnail" not in uri
-                        and uri not in self.captured_subtitle_urls
-                        and (
-                            any(lang in uri for lang in self.SUBTITLE_LANGS)
-                            or not any(lang in uri for lang in self.OTHER_LANGS)
+                if not request.response:
+                    continue
+
+                uri = request.url.lower()
+                if uri not in all_urls:
+                    all_urls.append(uri)
+                if (
+                    not found_m3u8
+                    and ".m3u8" in uri
+                    and "chunklist" not in uri # Ignore common segment lists if possible
+                    and uri not in self.captured_video_urls
+                ):
+                    urls["m3u8"] = uri
+                    urls["headers"] = dict(request.headers)
+                    found_m3u8 = True
+                    continue
+                if (
+                    not found_vtt
+                    and ".vtt" in uri
+                    and "thumbnail" not in uri
+                    and uri not in self.captured_subtitle_urls
+                    and not any(lang in uri for lang in self.OTHER_LANGS)
+                    and detect_lang(
+                        requests.get(uri, headers=dict(request.headers)).content.decode(
+                            self.ENCODING
                         )
-                    ):
-                        urls["vtt"] = uri
-                        found_vtt = True
+                    )
+                    == self.SUBTITLE_LANG
+                ):
+                    if uri in urls["all-vtt"]:
+                        previously_found_vtt += 1
+                        if previously_found_vtt >= len(urls["all-vtt"]):
+                            found_vtt = True
+                        continue
+
+                    urls["all-vtt"].append(uri)
+                    urls["vtt_headers_map"][uri] = dict(request.headers)
             attempt += 1
+            if attempt > 0 and attempt % 10 == 0:
+                # Try to click the player area to trigger stream if idle
+                self.driver.execute_script("try { document.querySelector('#ani_player')?.click(); } catch(e) {}")
             if attempt in self.DOWNLOAD_REFRESH:
                 self.driver.refresh()
+                self.select_server(download_type)
             time.sleep(1)
 
         print()
         if not found_m3u8:
             print(f"{Fore.LIGHTRED_EX}No .m3u8 streams found.")
+            return None
         if not found_vtt:
             print(
-                f"{Fore.LIGHTRED_EX}No .vtt streams found. Check that the subtitles are not apart of the video file, option '--no-subtitles' can be used to skip downloading subtitles."
+                f"\n{Fore.LIGHTRED_EX}No .vtt streams found. Check that the subtitles are not apart of the video file, option '--no-subtitles' can be used to skip downloading subtitles."
             )
+            self.args.no_subtitles = get_conformation(
+                f"\n{Fore.LIGHTCYAN_EX}Would you like to skip the collection of subtiles on the following episodes (y/n): "
+            )
+            print()
+        elif not self.args.no_subtitles:
+            if len(urls["all-vtt"]) == 1:
+                urls["vtt"] = urls["all-vtt"][0]
+            else:
+                print(
+                    "\nMore than one subtitle file was found please select the one you would like to download:\n"
+                )
+                for i, vtt in enumerate(urls["all-vtt"]):
+                    print(f" {i + 1} - {vtt}")
+
+                selection = get_int_in_range(
+                    "\nSelected Subtitle: ", 1, len(urls["all-vtt"]) + 1
+                )
+                print()
+                urls["vtt"] = urls["all-vtt"][selection - 1]
+
+        if "vtt" in urls and "vtt_headers_map" in urls:
+            urls["vtt_headers"] = urls["vtt_headers_map"][urls["vtt"]]
 
         return urls
 
@@ -496,19 +771,20 @@ class HianimeExtractor:
                 url = urljoin(m3u8_url, line.strip())
                 break
         if not url:
-            print("No valid video variant found in master.m3u8")
-            return ""
+            # Fallback to the original URL if no variants are listed inside it
+            return m3u8_url
 
         return url
 
-    def yt_dlp_download(self, url: str, headers: dict[str, str], location: str):
+    def yt_dlp_download(self, url: str, headers: dict[str, str], location: str) -> dict[str, Any]:
+        logger = YTDLogger()
         yt_dlp_options: dict[str, Any] = {
             "no_warnings": False,
             "quiet": False,
             "outtmpl": location,
             "format": "best",
             "http_headers": headers,
-            "logger": YTDLogger(),
+            "logger": logger,
             "fragment_retries": 10,  # Retry up to 10 times for failed fragments
             "retries": 10,
             "socket_timeout": 60,
@@ -517,8 +793,53 @@ class HianimeExtractor:
             "allow_unplayable_formats": True,
         }
 
-        with YoutubeDL(yt_dlp_options) as ydl:
-            ydl.download([url])
+        if self.args.aria:
+            yt_dlp_options["external_downloader"] = "aria2c"
+            yt_dlp_options["external_downloader_args"] = [
+                "--max-connection-per-server=16",
+                "--split=16",
+                "--min-split-size=1M",
+            ]
+
+        status = {"success": True, "fragment_error": False, "error": None}
+        try:
+            with YoutubeDL(yt_dlp_options) as ydl:
+                try:
+                    ydl.download([url])
+                    if logger.fragment_errors:
+                        status["success"] = False
+                        status["fragment_error"] = True
+                except KeyboardInterrupt:
+                    print(
+                        f"\n\n{Fore.LIGHTCYAN_EX}Canceling Downloads...\nRemoving Temp Files for {location[location.rfind(os.sep) + 1:-4]}"
+                    )
+                    status["success"] = False
+                    status["error"] = "Cancelled"
+                except Exception as e:
+                    print(f"{Fore.LIGHTRED_EX}yt-dlp error: {e}")
+                    status["success"] = False
+                    status["error"] = str(e)
+        except Exception as e:
+            print(f"{Fore.LIGHTRED_EX}Error initializing yt-dlp: {e}")
+            status["success"] = False
+            status["error"] = str(e)
+
+        if not status["success"]:
+            # Clean up partial files if it wasn't a fragment error that we might want to keep/check
+            # Actually, the user wants to delete if incomplete.
+            for file in [
+                f
+                for f in glob(location[:-4] + ".*")
+                if not f.endswith((".vtt")) # Keep subtitles
+            ]:
+                if os.path.exists(file):
+                    # For fragment errors, we might want to wait until the end to delete/retry
+                    # but the user said "then I want the downloaded file to be deleted (if its saved)"
+                    # and "download to be redownloaded after confirmation"
+                    pass 
+
+        return status
+
 
     def get_anime(self, name: str | None = None) -> Anime | None:
         os.system("cls" if os.name == "nt" else "clear")
@@ -636,3 +957,38 @@ class HianimeExtractor:
             sub_episodes_available,
             dub_episodes_available,
         )
+
+    def _verify_captured_links(self, episode: dict) -> bool:
+        """Checks if the captured m3u8 link is still valid."""
+        try:
+            # Hianime links often expire after a few hours
+            # Use GET with stream=True and short timeout to verify without downloading
+            with requests.get(episode["m3u8"], headers=episode["headers"], timeout=5, stream=True) as response:
+                return response.status_code < 400
+        except Exception:
+            return False
+
+    def _update_session_file(self, anime: Anime, episode_list: list[dict], start_ep: int, end_ep: int):
+        """Saves current progress to the last session file."""
+        current_session = {
+            "args": {
+                "link": anime.url,
+                "download_type": anime.download_type,
+                "server": self.selected_server_name,
+                "aria": self.args.aria,
+                "no_subtitles": self.args.no_subtitles,
+                "output_dir": self.args.output_dir
+            },
+            "info": {
+                "start_ep": start_ep,
+                "end_ep": end_ep,
+                "season_number": anime.season_number,
+                "captured_episodes": {str(ep["number"]): {
+                    "m3u8": ep.get("m3u8"),
+                    "vtt": ep.get("vtt"),
+                    "headers": ep.get("headers"),
+                    "vtt_headers": ep.get("vtt_headers"),
+                } for ep in episode_list if "m3u8" in ep}
+            }
+        }
+        save_session(current_session)

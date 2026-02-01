@@ -67,8 +67,26 @@ class InstagramExtractor(GeneralExtractor):
             return
 
         title = self.args.filename if self.args.filename else self.get_post_title()
-        self.yt_dlp_download(
+        status = self.yt_dlp_download(
             self.link,
-            f"{self.args.output_dir}{os.sep}{title}",
+            os.path.join(self.args.output_dir, title), 
             title,
         )
+
+        
+        from colorama import Fore
+        from tools.functions import get_conformation, safe_remove
+
+        print(f"\n{Fore.LIGHTCYAN_EX}=== Download Summary ===")
+        if status['success']:
+            print(f"{Fore.LIGHTGREEN_EX}Successfully downloaded.")
+        elif status.get('fragment_error'):
+            print(f"{Fore.LIGHTRED_EX}Download was INCOMPLETE (Fragments missing).")
+            if get_conformation(f"{Fore.LIGHTCYAN_EX}Would you like to delete the incomplete file and try redownloading it? (y/n): "):
+                location = self.args.output_dir
+                filepath = os.path.join(location, f"{title}.mp4")
+                safe_remove(filepath)
+                self.run() # Recursive retry
+        else:
+            print(f"{Fore.LIGHTRED_EX}Download FAILED ({status.get('error', 'Unknown error')})")
+
