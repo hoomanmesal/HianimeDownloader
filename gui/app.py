@@ -9,6 +9,7 @@ from gui.frames.options import OptionsFrame
 from gui.frames.progress import ProgressFrame
 from gui.frames.logs import LogFrame
 from gui.dialogs.subtitle import SubtitleDialog
+from gui.dialogs.error import ErrorDialog
 from gui.services.download import DownloadService, DownloadConfig
 from gui.services.events import EventType
 from tools.config import load_config
@@ -65,6 +66,7 @@ class HianimeGUI(ctk.CTk):
 
         # User interaction events
         events.on(EventType.SUBTITLE_CHOICE_NEEDED, self._on_subtitle_choice_needed)
+        events.on(EventType.RETRY_PROMPT, self._on_retry_prompt)
 
         # Status events
         events.on(EventType.STATUS_UPDATE, self._on_status_update)
@@ -328,6 +330,23 @@ class HianimeGUI(ctk.CTk):
 
         # Send selection back to the download service
         self.download_service.set_subtitle_selection(selected)
+
+    def _on_retry_prompt(self, data: dict[str, Any]):
+        """Handle retry prompt event - show error dialog."""
+        message = data.get("message", "An error occurred")
+
+        # Show error dialog with retry/skip/abort options
+        dialog = ErrorDialog(
+            self,
+            message=message,
+            title="Download Error",
+            can_retry=True,
+            can_skip=True,
+        )
+        result = dialog.get_result()
+
+        # Send result back to the download service
+        self.download_service.set_retry_result(result or "skip")
 
 
 def main():

@@ -271,17 +271,35 @@ class GUIHianimeExtractor:
                     })
                     continue
 
-                # Capture media URLs
-                self._emit(EventType.CAPTURE_START, {"episode": ep_num})
-                capture_result = self._capture_episode(episode, anime.download_type, config.download_subtitles)
+                # Capture media URLs (with retry support)
+                capture_result = None
+                while True:
+                    self._emit(EventType.CAPTURE_START, {"episode": ep_num})
+                    capture_result = self._capture_episode(episode, anime.download_type, config.download_subtitles)
 
-                if not capture_result.success:
+                    if capture_result.success:
+                        break
+
+                    # Capture failed - ask user what to do
                     self._log(f"Failed to capture Episode {ep_num}: {capture_result.error}", "ERROR")
+
+                    if self.retry_callback:
+                        should_retry = self.retry_callback(f"Failed to capture Episode {ep_num}: {capture_result.error}")
+                        if self._cancelled:
+                            break
+                        if should_retry:
+                            self._log(f"Retrying capture for Episode {ep_num}...")
+                            continue
+                    break
+
+                if not capture_result or not capture_result.success:
                     results.append(DownloadResult(
                         episode_number=ep_num,
                         success=False,
-                        error=capture_result.error,
+                        error=capture_result.error if capture_result else "Capture failed",
                     ))
+                    if self._cancelled:
+                        break
                     continue
 
                 # Update episode with captured URLs
@@ -293,16 +311,47 @@ class GUIHianimeExtractor:
 
                 self._emit(EventType.CAPTURE_COMPLETE, {"episode": ep_num})
 
-                # Download the episode
-                download_result = self._download_episode(anime, episode, folder, config.download_subtitles)
+                # Download the episode (with retry support)
+                download_result = None
+                while True:
+                    download_result = self._download_episode(anime, episode, folder, config.download_subtitles)
+
+                    if download_result.success:
+                        break
+
+                    # Download failed - ask user what to do
+                    if self.retry_callback and not download_result.fragment_error:
+                        should_retry = self.retry_callback(
+                            f"Failed to download Episode {ep_num}: {download_result.error}"
+                        )
+                        if self._cancelled:
+                            break
+                        if should_retry:
+                            self._log(f"Retrying download for Episode {ep_num}...")
+                            continue
+                    elif download_result.fragment_error and self.retry_callback:
+                        # Fragment errors might benefit from retry
+                        should_retry = self.retry_callback(
+                            f"Episode {ep_num} has missing fragments (incomplete download)"
+                        )
+                        if self._cancelled:
+                            break
+                        if should_retry:
+                            self._log(f"Retrying download for Episode {ep_num}...")
+                            continue
+                    break
+
                 results.append(download_result)
 
                 self._emit(EventType.EPISODE_COMPLETE, {
                     "episode": ep_num,
                     "current": idx,
                     "total": total_episodes,
-                    "success": download_result.success,
+                    "success": download_result.success if download_result else False,
                 })
+
+                if self._cancelled:
+                    break
 
                 # Small delay between episodes
                 if idx < total_episodes:
